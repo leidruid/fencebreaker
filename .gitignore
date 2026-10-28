@@ -1,0 +1,8 @@
+daemon/fencebreakerd
+*.apk
+*.ipk
+/bin/
+/dist/
+/out/
+*.test
+tests/sdk/

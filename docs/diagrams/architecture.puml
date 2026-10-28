@@ -1,0 +1,65 @@
+@startuml architecture
+!theme plain
+skinparam defaultFontName DejaVu Sans
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam ArrowColor #444444
+skinparam rectangle {
+  BackgroundColor #F8F8F8
+  BorderColor #555555
+}
+title Компоненты fencebreaker\n(OpenWrt 25.12+, x86/64)
+
+actor "Клиенты LAN" as clients
+
+package "Роутер OpenWrt" {
+  component "LuCI\nluci-app-fencebreaker" as luci
+  component "UCI\n/etc/config/fencebreaker" as uci
+
+  component "fencebreakerd\n(демон, Go)" as daemon
+
+  component "fb-coredns\nCoreDNS 1.15 + плагин fbtenant" as coredns
+
+  component "sing-box\n(VLESS, опционально)" as singbox
+
+  component "nftables (fw4)\nтаблица inet fencebreaker" as nft
+
+  component "dnsmasq\n(обычный DNS роутера)" as dnsmasq
+}
+
+cloud "Upstream DNS\n(11 форматов: udp/tcp/tls/https/h3/quic/sdns…)" as dnsup
+cloud "Ресурсы интернета" as inet
+cloud "VLESS-сервер\n(REALITY)" as vless
+
+clients --> dnsmasq : DNS не-тенантов
+clients ..> nft : DNS тенантов :53\n(перехват dns_hijack)
+nft ..> coredns : редирект на :1053
+
+luci --> uci
+daemon --> uci : чтение конфига
+daemon -> nft : правила, наборы, fwmark,\nтаблицы маршрутов
+daemon -> coredns : Corefile + dns_state.json\n(перегенерация при apply)
+daemon -> singbox : config.json, старт/стоп
+
+coredns --> dnsup : запросы по тенантам\n(SO_MARK при dns_via_tunnel)
+coredns -> nft : изученные IP →\nнаборы *_inc_dns/*_exc_dns (timeout-сеты)
+
+clients -> nft : пакеты
+nft -> inet : fwmark тенанта →\nтаблица маршрутов t{N}
+nft -> singbox : через fb-tun (VLESS)
+singbox --> vless
+inet <-- nft
+inet <-- singbox
+
+note bottom of daemon
+  Пересоздаёт правила при изменении UCI,
+  сохраняя живые DNS-адреса из nft-наборов.
+  Пишет /var/run/fencebreaker/status.json.
+end note
+note right of coredns
+  Один процесс на все тенанты.
+  Плагин fbtenant: выбор апстрима по
+  источнику запроса, обучение адресов,
+  keep-alive (dns_keepalive).
+end note
+@enduml

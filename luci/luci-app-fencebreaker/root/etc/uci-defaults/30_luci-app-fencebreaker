@@ -1,0 +1,20 @@
+#!/bin/sh
+# Register the fencebreaker UCI config in ucitrack so that LuCI triggers
+# the fencebreaker procd init script on config apply.
+
+[ -x /bin/uci ] || [ -x /usr/bin/uci ] || exit 0
+
+if ! uci -q get ucitrack.@fencebreaker[0] >/dev/null; then
+	uci -q batch <<EOF
+add ucitrack fencebreaker
+set ucitrack.@fencebreaker[-1].init='fencebreaker'
+commit ucitrack
+EOF
+fi
+
+rm -rf /var/luci-modulecache/
+rm -f /var/luci-indexcache.*.json
+
+[ -x /etc/init.d/rpcd ] && /etc/init.d/rpcd reload
+
+exit 0

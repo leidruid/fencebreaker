@@ -1,0 +1,243 @@
+diff --git a/core/dnsserver/zdirectives.go b/core/dnsserver/zdirectives.go
+index 7940a4b..1f27f9c 100644
+--- a/core/dnsserver/zdirectives.go
++++ b/core/dnsserver/zdirectives.go
+@@ -11,65 +11,23 @@ package dnsserver
+ // care what plugin above them are doing.
+ var Directives = []string{
+ 	"root",
++	"fbtenant",
+ 	"metadata",
+-	"geoip",
+ 	"cancel",
+-	"proxyproto",
+-	"quic",
+-	"grpc_server",
+-	"https",
+-	"https3",
+-	"timeouts",
+-	"multisocket",
+-	"reload",
+-	"nsid",
+-	"bufsize",
+ 	"bind",
+ 	"debug",
+-	"trace",
+-	"ready",
+-	"health",
+-	"pprof",
+-	"shed",
+-	"prometheus",
+ 	"errors",
+ 	"log",
+-	"dnstap",
+-	"local",
+-	"dns64",
+-	"siit",
+-	"any",
++	"health",
++	"ready",
++	"whoami",
++	"reload",
+ 	"chaos",
+-	"loadbalance",
+-	"tsig",
+-	"rewrite",
+-	"autopath",
+-	"acl",
+ 	"cache",
+-	"header",
+-	"dnssec",
+-	"tls",
+-	"minimal",
+ 	"template",
+-	"transfer",
+-	"dynupdate",
+ 	"hosts",
+-	"route53",
+-	"azure",
+-	"clouddns",
+-	"k8s_external",
+-	"kubernetes",
+ 	"file",
+-	"auto",
+-	"secondary",
+-	"etcd",
+ 	"loop",
+-	"forward",
+-	"grpc",
+ 	"erratic",
+-	"whoami",
+-	"on",
+-	"sign",
+ 	"view",
+-	"nomad",
+ }
+diff --git a/core/plugin/zplugin.go b/core/plugin/zplugin.go
+index d1af57f..7f2b8d6 100644
+--- a/core/plugin/zplugin.go
++++ b/core/plugin/zplugin.go
+@@ -4,66 +4,25 @@ package plugin
+ 
+ import (
+ 	// Include all plugins.
+-	_ "github.com/coredns/caddy/onevent"
+-	_ "github.com/coredns/coredns/plugin/acl"
+-	_ "github.com/coredns/coredns/plugin/any"
+-	_ "github.com/coredns/coredns/plugin/auto"
+-	_ "github.com/coredns/coredns/plugin/autopath"
+-	_ "github.com/coredns/coredns/plugin/azure"
+ 	_ "github.com/coredns/coredns/plugin/bind"
+-	_ "github.com/coredns/coredns/plugin/bufsize"
+ 	_ "github.com/coredns/coredns/plugin/cache"
+ 	_ "github.com/coredns/coredns/plugin/cancel"
+ 	_ "github.com/coredns/coredns/plugin/chaos"
+-	_ "github.com/coredns/coredns/plugin/clouddns"
+ 	_ "github.com/coredns/coredns/plugin/debug"
+-	_ "github.com/coredns/coredns/plugin/dns64"
+-	_ "github.com/coredns/coredns/plugin/dnssec"
+-	_ "github.com/coredns/coredns/plugin/dnstap"
+-	_ "github.com/coredns/coredns/plugin/dynupdate"
+ 	_ "github.com/coredns/coredns/plugin/erratic"
+ 	_ "github.com/coredns/coredns/plugin/errors"
+-	_ "github.com/coredns/coredns/plugin/etcd"
+ 	_ "github.com/coredns/coredns/plugin/file"
+-	_ "github.com/coredns/coredns/plugin/forward"
+-	_ "github.com/coredns/coredns/plugin/geoip"
+-	_ "github.com/coredns/coredns/plugin/grpc"
+-	_ "github.com/coredns/coredns/plugin/grpc_server"
+-	_ "github.com/coredns/coredns/plugin/header"
+ 	_ "github.com/coredns/coredns/plugin/health"
+ 	_ "github.com/coredns/coredns/plugin/hosts"
+-	_ "github.com/coredns/coredns/plugin/https"
+-	_ "github.com/coredns/coredns/plugin/https3"
+-	_ "github.com/coredns/coredns/plugin/k8s_external"
+-	_ "github.com/coredns/coredns/plugin/kubernetes"
+-	_ "github.com/coredns/coredns/plugin/loadbalance"
+-	_ "github.com/coredns/coredns/plugin/local"
+ 	_ "github.com/coredns/coredns/plugin/log"
+ 	_ "github.com/coredns/coredns/plugin/loop"
+ 	_ "github.com/coredns/coredns/plugin/metadata"
+-	_ "github.com/coredns/coredns/plugin/metrics"
+-	_ "github.com/coredns/coredns/plugin/minimal"
+-	_ "github.com/coredns/coredns/plugin/multisocket"
+-	_ "github.com/coredns/coredns/plugin/nomad"
+-	_ "github.com/coredns/coredns/plugin/nsid"
+-	_ "github.com/coredns/coredns/plugin/pprof"
+-	_ "github.com/coredns/coredns/plugin/proxyproto"
+-	_ "github.com/coredns/coredns/plugin/quic"
+ 	_ "github.com/coredns/coredns/plugin/ready"
+ 	_ "github.com/coredns/coredns/plugin/reload"
+-	_ "github.com/coredns/coredns/plugin/rewrite"
+ 	_ "github.com/coredns/coredns/plugin/root"
+-	_ "github.com/coredns/coredns/plugin/route53"
+-	_ "github.com/coredns/coredns/plugin/secondary"
+-	_ "github.com/coredns/coredns/plugin/shed"
+-	_ "github.com/coredns/coredns/plugin/sign"
+-	_ "github.com/coredns/coredns/plugin/siit"
+ 	_ "github.com/coredns/coredns/plugin/template"
+-	_ "github.com/coredns/coredns/plugin/timeouts"
+-	_ "github.com/coredns/coredns/plugin/tls"
+-	_ "github.com/coredns/coredns/plugin/trace"
+-	_ "github.com/coredns/coredns/plugin/transfer"
+-	_ "github.com/coredns/coredns/plugin/tsig"
+ 	_ "github.com/coredns/coredns/plugin/view"
+ 	_ "github.com/coredns/coredns/plugin/whoami"
++
++	_ "github.com/leidruid/fencebreaker/coredns-plugin/fbtenant"
+ )
+diff --git a/plugin.cfg b/plugin.cfg
+index da8cbac..2fd1c33 100644
+--- a/plugin.cfg
++++ b/plugin.cfg
+@@ -1,84 +1,21 @@
+-# Directives are registered in the order they should be executed.
+-#
+-# Ordering is VERY important. Every plugin will feel the effects of all other
+-# plugin below (after) them during a request, but they must not care what plugin
+-# above them are doing.
+-
+-# How to rebuild with updated plugin configurations: Modify the list below and
+-# run `go generate && go build`
+-
+-# The parser takes the input format of:
+-#
+-#     <plugin-name>:<package-name>
+-# Or
+-#     <plugin-name>:<fully-qualified-package-name>
+-#
+-# External plugin example:
+-#
+-# log:github.com/coredns/coredns/plugin/log
+-# Local plugin example:
+-# log:log
+-
++# prefix:plugin
+ root:root
++fbtenant:github.com/leidruid/fencebreaker/coredns-plugin/fbtenant
+ metadata:metadata
+-geoip:geoip
+ cancel:cancel
+-proxyproto:proxyproto
+-quic:quic
+-grpc_server:grpc_server
+-https:https
+-https3:https3
+-timeouts:timeouts
+-multisocket:multisocket
+-reload:reload
+-nsid:nsid
+-bufsize:bufsize
+ bind:bind
+ debug:debug
+-trace:trace
+-ready:ready
+-health:health
+-pprof:pprof
+-shed:shed
+-prometheus:metrics
+ errors:errors
+ log:log
+-dnstap:dnstap
+-local:local
+-dns64:dns64
+-siit:siit
+-any:any
++health:health
++ready:ready
++whoami:whoami
++reload:reload
+ chaos:chaos
+-loadbalance:loadbalance
+-tsig:tsig
+-rewrite:rewrite
+-autopath:autopath
+-acl:acl
+ cache:cache
+-header:header
+-dnssec:dnssec
+-# Keep tls here so dnssec can sign ACME challenge records before authoritative backends run.
+-tls:tls
+-minimal:minimal
+ template:template
+-transfer:transfer
+-dynupdate:dynupdate
+ hosts:hosts
+-route53:route53
+-azure:azure
+-clouddns:clouddns
+-k8s_external:k8s_external
+-kubernetes:kubernetes
+ file:file
+-auto:auto
+-secondary:secondary
+-etcd:etcd
+ loop:loop
+-forward:forward
+-grpc:grpc
+ erratic:erratic
+-whoami:whoami
+-on:github.com/coredns/caddy/onevent
+-sign:sign
+ view:view
+-nomad:nomad

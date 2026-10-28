@@ -1,0 +1,33 @@
+@startuml element-lifecycle
+!theme plain
+skinparam defaultFontName DejaVu Sans
+skinparam shadowing false
+title Жизненный цикл изученного DNS-адреса\n(элемент nftables timeout-сета)
+
+state "Нет в наборе" as absent
+state "В наборе\nIP timeout = clamp(TTL,\n[ttl_min..ttl_max])" as live
+state "Продлён\n(keep-alive Refresh,\nновый timeout)" as refreshed
+state "Истёк\n(ядро удалило элемент)" as expired
+
+[*] --> absent
+absent --> live : DNS-ответ тенанта\n(learn, AddIfAbsent)
+live --> live : повторный запрос клиента:\nдубль пропускается,\nэлемент не продлевается
+live --> refreshed : dns_keepalive=1:\nфоновый перезапрос за\nmax(60с, 25%·TTL) до конца
+refreshed --> live
+live --> expired : истёк timeout\n(маркировка пакетов\nпропадает мгновенно)
+refreshed --> expired : keep-alive выключен\nили упал
+expired --> absent
+expired --> live : новый DNS-запрос клиента\nпереучивает адрес
+
+state "Реестр доменов\n(keeper)" as keeper {
+  state "активен" as k1
+  state "удалён:\nNXDOMAIN или\n3 ошибки подряд" as k2
+}
+k1 --> k2 : домен исчез\nили апстримы недоступны
+note right of keeper
+  Персистится в
+  /var/run/fencebreaker/keeper.bin,
+  восстанавливается при рестарте
+  сервиса (не после ребута).
+end note
+@enduml

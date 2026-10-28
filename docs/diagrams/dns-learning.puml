@@ -1,0 +1,43 @@
+@startuml dns-learning
+!theme plain
+skinparam defaultFontName DejaVu Sans
+skinparam shadowing false
+skinparam SequenceMessageAlignment center
+title Обучение DNS-адресов и keep-alive\n(плагин fbtenant)
+
+participant "Клиент\nсети тенанта" as client
+participant "nftables\n(dns_hijack)" as nft
+participant "fb-coredns\n(fbtenant)" as core
+participant "Зеркало наборов\n(в памяти)" as mirror
+participant "nftables\n*t1_inc_dns\n(timeout-сет)" as set
+participant "Upstream DNS\nтенанта" as up
+
+client -> nft : DNS-запрос :53\nexample.com A
+nft -> core : redirect :53 → :1053
+core -> core : определить тенанта\nпо IP клиента (сети/хосты)
+core -> core : кэш ответов тенанта
+note right : попадание — ответ без\nапстрима и без обучения
+core -> up : A-запрос через выбранный\nапстрим (политика + health,\nSO_MARK при dns_via_tunnel)
+up --> core : ответ: 93.184.216.34 TTL 300
+core -> core : домен входит в include\n(или исключён в exclude)?
+core -> mirror : AddIfAbsent(IP, timeout=\nclamp(TTL, 300…86400))
+mirror -> mirror : IP уже жив в зеркале?
+note right : да → пропуск (нет nft-вызова);\nrefresh_on_remain_pct>0 →\nобновление в остатке <N% TTL
+mirror -> set : add element\n{ IP timeout 300s }
+set --> core : OK
+core --> nft : ответ клиенту
+nft --> client : 93.184.216.34
+
+== keep-alive (dns_keepalive=1 у тенанта) ==
+
+loop каждые 15 с (скан реестра)
+  core -> core : реестр доменов:\nдо deadline осталось\nmax(60 с, 25%·TTL)?
+  core -> up : фоновый перезапрос домена\n(тот же апстрим/mark)
+  up --> core : актуальные A-записи
+  core -> mirror : Refresh(IP) —\nбезусловное продление
+  mirror -> set : add element\n(новый timeout)
+  note right : NXDOMAIN → домен удаляется\nиз реестра; 3 ошибки подряд →\nвозврат к пассивному обучению
+end
+core -> core : реестр → /var/run/fencebreaker/keeper.bin\n(бинарный, переживает рестарт)
+set -> set : ядро само удаляет элемент\nпо истечении timeout
+@enduml

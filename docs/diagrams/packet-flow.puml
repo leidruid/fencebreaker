@@ -1,0 +1,45 @@
+@startuml packet-flow
+!theme plain
+skinparam defaultFontName DejaVu Sans
+skinparam shadowing false
+title Путь пакета клиента тенанта\n(nftables, prerouting, без conntrack-привязки)
+
+participant "Клиент\n172.16.20.x" as client
+participant "nft\nmangle_pre\n(prerouting -150)" as pre
+queue "Наборы адресов\n(*_exc_dns, *_inc_dns,\ninc/exc_static, geoip)" as sets
+participant "Маршрутизация\nтаблица t{N}" as route
+participant "Канал тенанта" as egress
+
+client -> pre : пакет → 93.184.216.34:443
+pre -> pre : ip saddr @t1_src?\n(сети/hosts_full тенанта)
+alt адрес в exc-наборах\n(exc_dns/exc_static/exc_geoip)
+  pre -> route : без fwmark → основная\nтаблица (main)
+else адрес в inc-наборах\n(inc_dns/inc_static/inc_geoip)
+  pre -> pre : meta mark set 0x1000\n(fwmark тенанта)
+  pre -> route : fwmark → таблица t{N}
+  route -> egress : default via канал
+else инвертированный режим\n(routing_mode=invert)
+  pre -> pre : всё, кроме исключений:\nmeta mark set 0x1000
+  pre -> route : fwmark → таблица t{N}
+  route -> egress : default via канал
+end
+
+alt egress_mode = interface
+  egress -> egress : выход через интерфейс\n(напр. wan2)
+else egress_mode = vless
+  egress -> egress : fb-tun → sing-box\n→ VLESS-сервер (REALITY)
+end
+
+note over pre
+  Правила матчат каждый пакет (не только
+  новые соединения): DNS-адрес в наборе
+  живёт, пока активен timeout-элемент —
+  либо его продляет keep-alive.
+end note
+note over route, egress
+  Канал недоступен:
+  fallback=main → маршрутизация откатывается
+  к основной таблице;
+  fallback=strict → пакеты тенанта блокируются.
+end note
+@enduml

@@ -1,0 +1,23 @@
+{
+	"luci-app-fencebreaker": {
+		"description": "Grant access to fencebreaker",
+		"read": {
+			"uci": [ "fencebreaker", "network", "dhcp" ],
+			"ubus": {
+				"file": [ "read" ],
+				"luci": [ "getDHCPLeases" ],
+				"log": [ "read" ],
+				"network.device": [ "status" ]
+			},
+			"file": {
+				"/var/run/fencebreaker/status.json": [ "read" ],
+				"/var/run/fencebreaker/plugin_status.json": [ "read" ],
+				"/tmp/run/fencebreaker/status.json": [ "read" ],
+				"/tmp/run/fencebreaker/plugin_status.json": [ "read" ]
+			}
+		},
+		"write": {
+			"uci": [ "fencebreaker" ]
+		}
+	}
+}

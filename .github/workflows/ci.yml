@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Two separate Go modules (daemon/ and coredns-plugin/fbtenant/), so
+      # module caching is disabled and each module is handled on its own.
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: false
+
+      - name: Build, vet and test daemon
+        run: |
+          cd daemon
+          go build ./...
+          go vet ./...
+          go test ./... -count=1
+
+      - name: Build, vet and test coredns plugin (fbtenant)
+        run: |
+          cd coredns-plugin/fbtenant
+          go build ./...
+          go vet ./...
+          go test ./... -count=1
+
+      - name: Shellcheck scripts
+        run: |
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck scripts/*.sh
+          else
+            echo "shellcheck is not installed; skipping"
+          fi
+
+  build-sdk:
+    runs-on: ubuntu-latest
+    container:
+      image: openwrt/sdk:x86-64-openwrt-25.12
+      # The SDK image's entrypoint drops to user buildbot; run as root so
+      # both the workspace and /builder are writable (the entrypoint chowns
+      # /builder for us).
+      options: --user root
+    env:
+      TARGET: x86/64
+      VERSION_PATH: releases/25.12.0
+      DOWNLOAD_FILE: 'sdk-.*x86_64.tar.[xz|zst]'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download SDK, add feed and build packages
+        run: |
+          set -eu
+          cd /builder
+          # the sdk image is a builder environment: setup.sh fetches the SDK
+          # tarball per TARGET/VERSION_PATH and unpacks it into /builder
+          [ -f rules.mk ] || ./setup.sh
+          test -f rules.mk
+
+          # feeds.conf must start from feeds.conf.default (packages/luci
+          # feeds) — writing only our line would disable them
+          [ -f feeds.conf ] || cp feeds.conf.default feeds.conf
+          echo "src-link fencebreaker $GITHUB_WORKSPACE" >> feeds.conf
+
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          for pkg in fencebreaker fencebreaker-coredns luci-app-fencebreaker; do
+            echo "CONFIG_PACKAGE_${pkg}=m" >> .config
+          done
+          make defconfig
+          make package/fencebreaker/compile package/fencebreaker-coredns/compile package/luci-app-fencebreaker/compile -j2 V=s
+          echo "SDK_DIR=/builder" >> "$GITHUB_ENV"
+
+      - name: Build apk repository index
+        run: |
+          cd /builder
+          sh "$GITHUB_WORKSPACE/scripts/make-apk-repo.sh" /builder/bin/packages
+
+      - name: Upload apk artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-packages
+          # only the fencebreaker feed output: bin/packages also receives
+          # default target packages (firmware etc.) built along
+          path: |
+            /builder/bin/packages/**/fencebreaker/*.apk
+            /builder/bin/packages/**/fencebreaker/APKINDEX.tar.gz
+          if-no-files-found: error
+
+  release:
+    # Attach the built apk packages (and the apk index) to the GitHub Release
+    # of the pushed v* tag. Regular pushes/PRs just build and upload
+    # artifacts.
+    if: >-
+      needs.test.result == 'success' &&
+      needs.build-sdk.result == 'success' &&
+      startsWith(github.ref, 'refs/tags/v')
+    needs: [test, build-sdk]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: apk-packages
+          path: artifact
+
+      - name: Collect apk packages
+        run: |
+          mkdir -p release
+          find artifact -path '*/fencebreaker/*' -name '*.apk' -exec cp {} release/ \;
+          find artifact -path '*/fencebreaker/*' -name 'APKINDEX.tar.gz' -exec cp {} release/ \;
+          ls -l release
+          [ -n "$(find release -name 'fencebreaker-[0-9]*.apk')" ] || {
+            echo "no fencebreaker apk found in the artifact" >&2
+            exit 1
+          }
+
+      - name: Create GitHub Release with apk assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          body: |
+            Пакеты fencebreaker для OpenWrt 25.12+ (apk, x86/64):
+            `fencebreaker`, `fencebreaker-coredns`, `luci-app-fencebreaker`,
+            `luci-i18n-fencebreaker-ru`.
+
+            ## Установка на роутер (одной командой)
+
+            ```sh
+            curl -sfL https://raw.githubusercontent.com/leidruid/fencebreaker/main/scripts/install-openwrt.sh | sh -
+            ```
+
+            Для VLESS-каналов добавьте sing-box:
+
+            ```sh
+            curl -sfL https://raw.githubusercontent.com/leidruid/fencebreaker/main/scripts/install-openwrt.sh | sh -s -- --with-singbox
+            ```
+
+            Установка конкретной версии: добавьте `--version <тег>` (например,
+            `--version v0.1.0`).
+
+            ## Вручную
+
+            Скачайте `.apk` ниже, скопируйте на роутер и выполните:
+
+            ```sh
+            apk add --allow-untrusted /tmp/fencebreaker-coredns-*.apk \
+                /tmp/fencebreaker-0*.apk /tmp/luci-app-fencebreaker-*.apk \
+                /tmp/luci-i18n-fencebreaker-ru-*.apk
+            ```
+
+            Подробности: [README](https://github.com/leidruid/fencebreaker#установка)
+            и [docs/INSTALL.md](https://github.com/leidruid/fencebreaker/blob/main/docs/INSTALL.md).

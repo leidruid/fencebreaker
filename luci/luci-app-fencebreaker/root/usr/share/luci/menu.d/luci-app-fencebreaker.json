@@ -1,0 +1,71 @@
+{
+	"admin/status/fencebreaker": {
+		"title": "fencebreaker",
+		"order": 75,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [ "luci-app-fencebreaker" ]
+		}
+	},
+
+	"admin/status/fencebreaker/status": {
+		"title": "Статус",
+		"order": 10,
+		"action": {
+			"type": "view",
+			"path": "fencebreaker/status"
+		},
+		"depends": {
+			"acl": [ "luci-app-fencebreaker" ]
+		}
+	},
+
+	"admin/status/fencebreaker/log": {
+		"title": "Журнал",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "fencebreaker/log"
+		},
+		"depends": {
+			"acl": [ "luci-app-fencebreaker" ]
+		}
+	},
+
+	"admin/network/fencebreaker": {
+		"title": "fencebreaker",
+		"order": 65,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [ "luci-app-fencebreaker" ]
+		}
+	},
+
+	"admin/network/fencebreaker/tenants": {
+		"title": "Тенанты",
+		"order": 10,
+		"action": {
+			"type": "view",
+			"path": "fencebreaker/tenants"
+		},
+		"depends": {
+			"acl": [ "luci-app-fencebreaker" ]
+		}
+	},
+
+	"admin/network/fencebreaker/lists": {
+		"title": "Списки",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "fencebreaker/lists"
+		},
+		"depends": {
+			"acl": [ "luci-app-fencebreaker" ]
+		}
+	}
+}
