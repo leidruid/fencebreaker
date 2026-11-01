@@ -88,3 +88,55 @@ func TestGetDefaults(t *testing.T) {
 		t.Fatal("List must never return nil")
 	}
 }
+
+// TestParseMultilineQuotedValue guards the LuCI textarea flow: a quoted value
+// spanning several physical lines (libuci accepts and re-emits it, e.g.
+// manual list content saved from the Lists page).
+func TestParseMultilineQuotedValue(t *testing.T) {
+	cfg, err := Parse([]byte(`config fencebreaker 'global'
+	option enabled '1'
+
+config list
+	option name 'dom_services'
+	option content 'cloudflare.com
+one.one.one.one
+discord.com
+# comment inside value
+tiktok.com'
+`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	s := cfg.SectionsOfType("list")
+	if len(s) != 1 {
+		t.Fatalf("list sections = %d, want 1", len(s))
+	}
+	if s[0].Get("name", "") != "dom_services" {
+		t.Fatalf("name = %q", s[0].Get("name", ""))
+	}
+	want := "cloudflare.com\none.one.one.one\ndiscord.com\n# comment inside value\ntiktok.com"
+	if got := s[0].Get("content", ""); got != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+	// a section after the multiline value must still parse
+	if cfg.Named("fencebreaker", "global") == nil {
+		t.Fatal("section after multiline value missing")
+	}
+}
+
+func TestParseMultilineListValue(t *testing.T) {
+	cfg, err := Parse([]byte("config t 's'\n	list k 'a\nb'\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := cfg.Named("t", "s").List("k"); !reflect.DeepEqual(got, []string{"a\nb"}) {
+		t.Fatalf("list = %q", got)
+	}
+}
+
+func TestParseUnterminatedAtEOF(t *testing.T) {
+	_, err := Parse([]byte("config t 's'\n	option content 'never closed\nstill open\n"))
+	if err == nil || !strings.Contains(err.Error(), "unterminated quote") {
+		t.Fatalf("expected unterminated quote, got %v", err)
+	}
+}

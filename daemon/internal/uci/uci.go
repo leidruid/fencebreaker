@@ -96,6 +96,9 @@ func (c *Config) Named(typ, name string) *Section {
 
 // Parse parses the UCI config format. Unknown directives and malformed lines
 // are collected into the returned config error list but do not stop parsing.
+// A quoted value may span several physical lines (libuci behavior relied on
+// by LuCI textareas, e.g. manual list content) — such lines are joined into
+// one logical line before splitting.
 func Parse(data []byte) (*Config, error) {
 	cfg := &Config{}
 	var errs []error
@@ -104,58 +107,91 @@ func Parse(data []byte) (*Config, error) {
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	anon := 0
 	lineNo := 0
+	// pending holds a logical line still waiting for its closing quote;
+	// startNo is the physical line it began on (for error messages).
+	var pending string
+	var startNo int
 	for sc.Scan() {
+		raw := sc.Text()
 		lineNo++
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		if pending == "" {
+			line := strings.TrimSpace(raw)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			fields, err := splitFields(line)
+			if errors.Is(err, errUnterminated) {
+				pending, startNo = line, lineNo
+				continue
+			}
+			if err != nil {
+				errs = append(errs, fmt.Errorf("line %d: %w", lineNo, err))
+				continue
+			}
+			handleFields(&cur, cfg, fields, lineNo, &anon, &errs)
 			continue
 		}
-		fields, err := splitFields(line)
+		// continuation of a quoted value: keep the raw line, newline joined
+		candidate := pending + "\n" + raw
+		fields, err := splitFields(candidate)
+		if errors.Is(err, errUnterminated) {
+			pending = candidate
+			continue
+		}
+		pending = ""
 		if err != nil {
-			errs = append(errs, fmt.Errorf("line %d: %w", lineNo, err))
+			errs = append(errs, fmt.Errorf("line %d: %w", startNo, err))
 			continue
 		}
-		if len(fields) == 0 {
-			continue
-		}
-		switch fields[0] {
-		case "config":
-			if len(fields) < 2 {
-				errs = append(errs, fmt.Errorf("line %d: config without type", lineNo))
-				cur = nil
-				continue
-			}
-			name := ""
-			if len(fields) >= 3 {
-				name = fields[2]
-			} else {
-				anon++
-				name = fmt.Sprintf("anon%d", anon)
-			}
-			cur = &Section{Type: fields[1], Name: name, Options: map[string]string{}, Lists: map[string][]string{}}
-			cfg.Sections = append(cfg.Sections, cur)
-		case "option":
-			if cur == nil || len(fields) < 3 {
-				errs = append(errs, fmt.Errorf("line %d: option outside section or without value", lineNo))
-				continue
-			}
-			// Unquoted values may contain spaces only inside quotes, which
-			// splitFields already merged; join defensively.
-			cur.Options[fields[1]] = strings.Join(fields[2:], " ")
-		case "list":
-			if cur == nil || len(fields) < 3 {
-				errs = append(errs, fmt.Errorf("line %d: list outside section or without value", lineNo))
-				continue
-			}
-			cur.Lists[fields[1]] = append(cur.Lists[fields[1]], strings.Join(fields[2:], " "))
-		default:
-			errs = append(errs, fmt.Errorf("line %d: unknown directive %q", lineNo, fields[0]))
-		}
+		handleFields(&cur, cfg, fields, startNo, &anon, &errs)
+	}
+	if pending != "" {
+		errs = append(errs, fmt.Errorf("line %d: unterminated quote", startNo))
 	}
 	if err := sc.Err(); err != nil {
 		errs = append(errs, err)
 	}
 	return cfg, errors.Join(errs...)
+}
+
+// handleFields applies one parsed logical line to the config under assembly.
+func handleFields(cur **Section, cfg *Config, fields []string, lineNo int, anon *int, errs *[]error) {
+	if len(fields) == 0 {
+		return
+	}
+	switch fields[0] {
+	case "config":
+		if len(fields) < 2 {
+			*errs = append(*errs, fmt.Errorf("line %d: config without type", lineNo))
+			*cur = nil
+			return
+		}
+		name := ""
+		if len(fields) >= 3 {
+			name = fields[2]
+		} else {
+			*anon++
+			name = fmt.Sprintf("anon%d", *anon)
+		}
+		*cur = &Section{Type: fields[1], Name: name, Options: map[string]string{}, Lists: map[string][]string{}}
+		cfg.Sections = append(cfg.Sections, *cur)
+	case "option":
+		if *cur == nil || len(fields) < 3 {
+			*errs = append(*errs, fmt.Errorf("line %d: option outside section or without value", lineNo))
+			return
+		}
+		// Unquoted values may contain spaces only inside quotes, which
+		// splitFields already merged; join defensively.
+		(*cur).Options[fields[1]] = strings.Join(fields[2:], " ")
+	case "list":
+		if *cur == nil || len(fields) < 3 {
+			*errs = append(*errs, fmt.Errorf("line %d: list outside section or without value", lineNo))
+			return
+		}
+		(*cur).Lists[fields[1]] = append((*cur).Lists[fields[1]], strings.Join(fields[2:], " "))
+	default:
+		*errs = append(*errs, fmt.Errorf("line %d: unknown directive %q", lineNo, fields[0]))
+	}
 }
 
 // ParseFile reads and parses a UCI file.
@@ -166,6 +202,10 @@ func ParseFile(path string) (*Config, error) {
 	}
 	return Parse(data)
 }
+
+// errUnterminated marks a quoted token whose closing quote has not been seen
+// (yet); Parse turns it into multi-line continuation.
+var errUnterminated = errors.New("unterminated quote")
 
 // splitFields splits a UCI line into tokens. Tokens may be single- or
 // double-quoted, in which case they can contain spaces; the quotes are
@@ -212,7 +252,7 @@ func splitFields(line string) ([]string, error) {
 		}
 	}
 	if inQuote != 0 {
-		return nil, errors.New("unterminated quote")
+		return nil, errUnterminated
 	}
 	flush()
 	return fields, nil
