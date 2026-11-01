@@ -190,10 +190,14 @@ func renderDNSSet(b *strings.Builder, name string, ttlMax int, restore []Elem) {
 
 // ---- helpers ----
 
+// canonCIDRs canonicalizes CIDR strings, keeping only IPv4 prefixes. Every
+// address set is declared type ipv4_addr and fencebreaker routes IPv4 only;
+// a single v6 element in the elements line aborts the whole nft -f apply,
+// so v6 input (geoip zones carry both families) is dropped here.
 func canonCIDRs(in []string) []string {
 	out := make([]string, 0, len(in))
 	for _, s := range in {
-		if _, n, err := net.ParseCIDR(s); err == nil {
+		if _, n, err := net.ParseCIDR(s); err == nil && len(n.IP) == 4 {
 			out = append(out, n.String())
 		}
 	}

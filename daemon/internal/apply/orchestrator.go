@@ -65,18 +65,18 @@ func (ExecRunner) Run(ctx context.Context, name string, args ...string) error {
 
 // Applied is the persisted state of the last successful apply.
 type Applied struct {
-	Generation   uint64              `json:"generation"`
+	Generation   uint64               `json:"generation"`
 	TenantSets   map[string][2]string `json:"tenant_sets"`
-	SingboxHash  string              `json:"singbox_hash"`
-	CorefileHash string              `json:"corefile_hash"`
-	SavedAt      time.Time           `json:"saved_at"`
+	SingboxHash  string               `json:"singbox_hash"`
+	CorefileHash string               `json:"corefile_hash"`
+	SavedAt      time.Time            `json:"saved_at"`
 }
 
 // Orchestrator wires the subsystems together.
 type Orchestrator struct {
 	Paths   Paths
 	Nft     *nftapply.Client
-	Routes  *routing.Manager
+	Routes  RouteManager
 	Cmd     Runner
 	Lists   *lists.Manager
 	Status  *status.Writer
@@ -86,11 +86,32 @@ type Orchestrator struct {
 	applied Applied
 	geo     geodata.Countries
 	geoMeta status.Geodata
+	// lastErr is the error of the last failed apply; it is reported in
+	// status.json until a later apply succeeds (the periodic status refresh
+	// must not clear it).
+	lastErr string
+	// egressStates caches tenant ID → channel state of the last Reconcile;
+	// the periodic status refresh re-parses UCI into fresh tenant objects
+	// and must not lose the runtime channel state.
+	egressStates map[string]string
+	// lastRuleset is the most recent successfully applied nftables ruleset
+	// (persisted to RunDir/ruleset.nft); a failed apply rolls the table back
+	// to it instead of leaving nothing installed.
+	lastRuleset string
 }
 
 // Logger is a minimal logging interface (log.Logger satisfies it).
 type Logger interface {
 	Printf(format string, v ...any)
+}
+
+// RouteManager is the routing-plane seam of the orchestrator; *routing.Manager
+// satisfies it.
+type RouteManager interface {
+	Remember(tenants []*model.Tenant)
+	Tenants() []*model.Tenant
+	Reconcile(ctx context.Context) error
+	Flush(ctx context.Context) error
 }
 
 // New creates the orchestrator.
@@ -112,7 +133,14 @@ func (o *Orchestrator) LoadApplied() error {
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal(data, &o.applied)
+	if err := json.Unmarshal(data, &o.applied); err != nil {
+		return err
+	}
+	// the ruleset is optional; a missing file only disables rollback
+	if b, err := os.ReadFile(o.Paths.RunDir + "/ruleset.nft"); err == nil {
+		o.lastRuleset = string(b)
+	}
+	return nil
 }
 
 func (o *Orchestrator) saveApplied() error {
@@ -233,13 +261,18 @@ func (o *Orchestrator) Full(ctx context.Context) error {
 		if err := o.Nft.DeleteTable(ctx); err != nil {
 			o.Log.Printf("nft delete table: %v", err)
 		}
+		o.lastRuleset = ""
+		_ = os.Remove(o.Paths.RunDir + "/ruleset.nft")
 	} else {
 		if err := o.Nft.DeleteTable(ctx); err != nil {
 			o.Log.Printf("nft delete table: %v", err)
 		}
 		if err := o.Nft.Apply(ctx, ruleset); err != nil {
+			o.rollbackRuleset(ctx, err)
 			return o.failStatus(err, "apply nft ruleset")
 		}
+		o.lastRuleset = ruleset
+		o.saveRuleset()
 	}
 
 	// routing
@@ -247,6 +280,7 @@ func (o *Orchestrator) Full(ctx context.Context) error {
 	if err := o.Routes.Reconcile(ctx); err != nil {
 		o.Log.Printf("routing reconcile: %v", err)
 	}
+	o.snapshotEgress()
 
 	// dns state
 	dnsState := dnsgen.Build(cfg, srcNets, parsedLists)
@@ -288,6 +322,7 @@ func (o *Orchestrator) Full(ctx context.Context) error {
 	if err := o.saveApplied(); err != nil {
 		o.Log.Printf("save applied state: %v", err)
 	}
+	o.lastErr = ""
 	o.writeStatus(cfg, started)
 	o.Log.Printf("full apply done in %s (tenants=%d gen=%d)", time.Since(started).Round(time.Millisecond), len(tenants), o.applied.Generation)
 	return nil
@@ -297,9 +332,23 @@ func (o *Orchestrator) Full(ctx context.Context) error {
 func (o *Orchestrator) RoutesOnly(ctx context.Context) error {
 	if err := o.Routes.Reconcile(ctx); err != nil {
 		o.Log.Printf("routing reconcile: %v", err)
+		o.snapshotEgress()
 		return err
 	}
+	o.snapshotEgress()
 	return nil
+}
+
+// snapshotEgress records the channel state of every remembered tenant as set
+// by the last Reconcile.
+func (o *Orchestrator) snapshotEgress() {
+	states := map[string]string{}
+	for _, t := range o.Routes.Tenants() {
+		if t.EgressState != "" {
+			states[t.ID] = t.EgressState
+		}
+	}
+	o.egressStates = states
 }
 
 // RefreshDue refreshes URL lists whose interval elapsed; it reports whether
@@ -335,9 +384,12 @@ func (o *Orchestrator) teardown(ctx context.Context) error {
 	if err := o.Nft.DeleteTable(ctx); err != nil {
 		o.Log.Printf("nft delete table: %v", err)
 	}
+	o.lastRuleset = ""
+	_ = os.Remove(o.Paths.RunDir + "/ruleset.nft")
 	o.stopService(ctx, "fencebreaker-singbox")
 	o.stopService(ctx, "fencebreaker-coredns")
 	o.applied = Applied{}
+	o.egressStates = nil
 	_ = o.saveApplied()
 	o.Log.Printf("fencebreaker disabled: cleaned up")
 	return nil
@@ -419,15 +471,49 @@ func setRPFilter(iface string) {
 	_ = os.WriteFile(path, []byte("2"), 0o644)
 }
 
+func (o *Orchestrator) saveRuleset() {
+	if err := os.MkdirAll(o.Paths.RunDir, 0o755); err != nil {
+		o.Log.Printf("mkdir %s: %v", o.Paths.RunDir, err)
+		return
+	}
+	tmp := o.Paths.RunDir + "/ruleset.nft.tmp"
+	if err := os.WriteFile(tmp, []byte(o.lastRuleset), 0o644); err != nil {
+		o.Log.Printf("save ruleset: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, o.Paths.RunDir+"/ruleset.nft"); err != nil {
+		o.Log.Printf("save ruleset: %v", err)
+	}
+}
+
+// rollbackRuleset restores the last successfully applied table after a new
+// ruleset failed to apply, keeping the previous behavior alive instead of
+// leaving no fencebreaker table at all.
+func (o *Orchestrator) rollbackRuleset(ctx context.Context, applyErr error) {
+	if o.lastRuleset == "" {
+		return
+	}
+	if err := o.Nft.DeleteTable(ctx); err != nil {
+		o.Log.Printf("nft rollback: delete table: %v", err)
+	}
+	if err := o.Nft.Apply(ctx, o.lastRuleset); err != nil {
+		o.Log.Printf("nft rollback to last good ruleset failed: %v (apply error: %v)", err, applyErr)
+		return
+	}
+	o.Log.Printf("nft apply failed (%v); last good ruleset restored", applyErr)
+}
+
 func (o *Orchestrator) failStatus(err error, stage string) error {
 	o.Log.Printf("%s: %v", stage, err)
+	applyErr := fmt.Errorf("%s: %w", stage, err)
+	o.lastErr = applyErr.Error()
 	doc := &status.Document{
 		Version: 1,
 		Updated: time.Now(),
-		Daemon:  status.Daemon{UptimeSec: int64(time.Since(o.Started).Seconds()), LastError: err.Error()},
+		Daemon:  status.Daemon{UptimeSec: int64(time.Since(o.Started).Seconds()), LastError: o.lastErr},
 	}
 	_ = o.Status.Write(doc)
-	return fmt.Errorf("%s: %w", stage, err)
+	return applyErr
 }
 
 // writeStatus assembles and stores the current status.json.
@@ -439,7 +525,7 @@ func (o *Orchestrator) writeStatus(cfg *model.Config, appliedAt time.Time) {
 			Generation: o.applied.Generation,
 			UptimeSec:  int64(time.Since(o.Started).Seconds()),
 			LastApply:  appliedAt,
-			LastError:  "",
+			LastError:  o.lastErr,
 		},
 		Tenants: status.TenantsFrom(cfg),
 		Geodata: o.geoMeta,
@@ -471,6 +557,13 @@ func (o *Orchestrator) writeStatus(cfg *model.Config, appliedAt time.Time) {
 		}
 	}
 	sort.Slice(doc.Tenants, func(i, j int) bool { return doc.Tenants[i].Name < doc.Tenants[j].Name })
+	// overlay the runtime channel state: cfg was (re)parsed from UCI and its
+	// tenant objects do not carry what Reconcile last saw
+	for i := range doc.Tenants {
+		if st, ok := o.egressStates[doc.Tenants[i].ID]; ok && st != "" {
+			doc.Tenants[i].Egress.State = st
+		}
+	}
 	_ = o.Status.Write(doc)
 }
 

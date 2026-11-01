@@ -32,6 +32,14 @@ func (m *Manager) Remember(tenants []*model.Tenant) {
 	m.tenants = tenants
 }
 
+// Tenants returns the remembered tenants; their EgressState fields carry the
+// result of the last Reconcile.
+func (m *Manager) Tenants() []*model.Tenant {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]*model.Tenant(nil), m.tenants...)
+}
+
 // LinkAddrFunc returns current IPv4 addresses of a link (for netres).
 func LinkAddrFunc(dev string) ([]net.Addr, error) {
 	link, err := netlink.LinkByName(dev)

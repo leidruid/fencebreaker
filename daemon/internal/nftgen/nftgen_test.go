@@ -134,6 +134,30 @@ func TestRenderGeoIPAndLists(t *testing.T) {
 	}
 }
 
+// TestRenderDropsNonIPv4 guards against the crash that took down the whole
+// apply on real hardware: geoip zones (and lists, and subnets) may contain
+// IPv6 prefixes, and one v6 element inside a type ipv4_addr set makes
+// "nft -f" reject the entire ruleset.
+func TestRenderDropsNonIPv4(t *testing.T) {
+	in := testInputs(t)
+	in.GeoIP["ru"] = append(in.GeoIP["ru"], "2001:db8::/32", "2a00:1450:4001::/48")
+	in.Config.Tenants[0].ExcludeGeoIP = []string{"ru"}
+	in.Config.Tenants[0].IncludeSubnets = []string{"10.1.2.0/24", "2001:db9::/48"}
+	in.Lists["blocked"] = &ParsedList{Nets: []string{"9.9.9.0/24", "2001:dba::/48"}}
+	in.Config.Tenants[0].IncludeLists = []string{"blocked"}
+	out := Render(in)
+	for _, bad := range []string{"2001:db8", "2001:db9", "2001:dba", "2a00:"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("IPv6 prefix %q leaked into the ipv4_addr ruleset", bad)
+		}
+	}
+	for _, good := range []string{"10.1.2.0/24", "9.9.9.0/24", "45.135.240.0/22"} {
+		if !strings.Contains(out, good) {
+			t.Errorf("IPv4 prefix %q is missing from the ruleset", good)
+		}
+	}
+}
+
 // TestNftCheck validates the rendered ruleset with the nft binary when the
 // environment allows it (nft -c needs CAP_NET_ADMIN and kernel nftables).
 func TestNftCheck(t *testing.T) {
