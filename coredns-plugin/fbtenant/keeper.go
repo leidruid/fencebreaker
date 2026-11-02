@@ -43,9 +43,9 @@ const (
 	// max(keeperWindowFloor, timeout/keeperWindowDiv).
 	keeperWindowFloor = 60 * time.Second
 	keeperWindowDiv   = 4
-	// keeperMaxFails consecutive failed re-resolves drop a record back to
-	// passive learning.
-	keeperMaxFails = 3
+	// keeperRetryBackoff spaces out retries of transport-failed re-resolves
+	// (timeouts do not drop a record: only NXDOMAIN/empty answers do).
+	keeperRetryBackoff = 60 * time.Second
 	// keeperStaleDrop bounds how old a persisted deadline may be to load
 	// (records older than this reference nobody's live elements).
 	keeperStaleDrop = 24 * time.Hour
@@ -105,6 +105,20 @@ func (k *tenantKeeper) register(name, kind string, timeout time.Duration, deadli
 	k.dirty = true
 }
 
+// registerIfAbsent seeds a domain without clobbering the deadline of a record
+// the keeper already maintains (learned or refreshed). Reports whether the
+// record was added.
+func (k *tenantKeeper) registerIfAbsent(name, kind string, timeout time.Duration, deadline time.Time) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if _, ok := k.records[name]; ok {
+		return false
+	}
+	k.records[name] = keepRecord{kind: kind, timeout: timeout, deadline: deadline}
+	k.dirty = true
+	return true
+}
+
 // remove drops a domain from the registry (expired for good: NXDOMAIN,
 // no upstreams or too many failures).
 func (k *tenantKeeper) remove(name string) {
@@ -146,17 +160,31 @@ func (k *tenantKeeper) refreshed(name string, timeout time.Duration, now time.Ti
 
 // failed records a failed re-resolve; it reports whether the record has hit
 // keeperMaxFails and must be dropped back to passive learning.
-func (k *tenantKeeper) failed(name string) bool {
+// postpone pushes a transport-failed record's retry out: a timeout or
+// SERVFAIL says nothing about the domain itself (a rate-limited or briefly
+// down upstream fails every record alike), so the keeper retries later
+// instead of dropping. Only definitive negatives (NXDOMAIN/empty answer)
+// remove a record.
+func (k *tenantKeeper) postpone(name string, now time.Time) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	r, ok := k.records[name]
 	if !ok {
-		return false
+		return
 	}
 	r.fails++
 	k.errors++
+	// deadline lands one refresh window past the backoff so the record is
+	// not immediately due again on the next pass
+	window := r.timeout / keeperWindowDiv
+	if window < keeperWindowFloor {
+		window = keeperWindowFloor
+	}
+	deadline := now.Add(keeperRetryBackoff + window)
+	if r.deadline.Before(deadline) {
+		r.deadline = deadline
+	}
 	k.records[name] = r
-	return r.fails >= keeperMaxFails
 }
 
 // noteError counts an error that is not the domain's fault (e.g. an nft
@@ -453,7 +481,11 @@ func (f *FBTenant) persistKeepers(path string) error {
 }
 
 // keeperPass scans all keepalive tenants and re-resolves due domains.
-// It runs on the watcher loop; spawns bounded goroutines for the queries.
+// It runs on the watcher loop; the drain itself runs in a background
+// goroutine (a freshly seeded registry counts hundreds of due records and
+// slow upstreams stretch a full pass to minutes — the watcher loop must
+// keep polling state and writing status). Overlapping passes are skipped:
+// the next tick continues draining what is still due.
 func (f *FBTenant) keeperPass(ctx context.Context) {
 	cfg := f.currentCfg()
 	if cfg == nil {
@@ -463,6 +495,19 @@ func (f *FBTenant) keeperPass(ctx context.Context) {
 	if m == nil {
 		return
 	}
+	if !f.passRunning.CompareAndSwap(false, true) {
+		return // previous pass still draining
+	}
+	go func() {
+		defer f.passRunning.Store(false)
+		f.dueRecords(ctx, cfg, m)
+	}()
+}
+
+// dueRecords refreshes every due record of every keepalive tenant with
+// bounded concurrency, blocking for a free slot (no per-tick skips: a
+// seeded registry is drained in one continuous pass).
+func (f *FBTenant) dueRecords(ctx context.Context, cfg *config, m *mirrorManager) {
 	now := time.Now()
 	enabled := map[string]bool{}
 	for _, t := range cfg.tenants {
@@ -482,8 +527,8 @@ func (f *FBTenant) keeperPass(ctx context.Context) {
 					defer func() { <-sem }()
 					f.refreshKeeperDomain(ctx, cfg, t, d)
 				}(t, d)
-			default:
-				// Concurrency cap reached: the next tick retries.
+			case <-ctx.Done():
+				return
 			}
 		}
 	}
@@ -543,9 +588,9 @@ func (f *FBTenant) refreshKeeperDomain(ctx context.Context, cfg *config, t *prep
 	resp, err := f.client.Resolve(qctx, servers, t.upstreamPolicy, d.name, dns.TypeA, mark)
 	now := time.Now()
 	if err != nil {
-		if drop := k.failed(d.name); drop {
-			k.remove(d.name)
-		}
+		// transport failure (timeout/SERVFAIL): the domain may be fine —
+		// the upstream might be rate-limiting our burst; retry later
+		k.postpone(d.name, now)
 		return
 	}
 	// NXDOMAIN or an empty answer means the domain is gone: stop keeping

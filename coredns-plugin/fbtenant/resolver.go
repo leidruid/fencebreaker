@@ -36,6 +36,8 @@ type dnsUpstreamClient struct {
 	timeout time.Duration
 	// markSupported caches the SO_MARK capability probe; nil until probed.
 	markSupported *bool
+	// markProbe serializes the capability probe across concurrent resolves.
+	markProbe sync.Once
 
 	health *upstreamHealth
 	// specs caches parsed addresses across queries.
@@ -68,23 +70,26 @@ func (c *dnsUpstreamClient) UpstreamHealth(addrs []string) []UpstreamHealthInfo 
 
 // probeMarkCapability checks once whether this process may set SO_MARK
 // (requires CAP_NET_ADMIN). On failure marking is disabled for the lifetime
-// of the process and a log line is emitted.
+// of the process and a log line is emitted. Keeper refreshes run resolves
+// concurrently, so the probe itself must be race-free.
 func (c *dnsUpstreamClient) probeMarkCapability() bool {
+	c.markProbe.Do(func() {
+		ok := false
+		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
+		if err == nil {
+			err = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_MARK, 0x1000)
+			unix.Close(fd)
+			ok = err == nil
+		}
+		if !ok {
+			log.Warningf("fbtenant: cannot set SO_MARK on sockets (CAP_NET_ADMIN missing?); dns_via_tunnel falls back to unmarked queries")
+		}
+		c.markSupported = &ok
+	})
 	if c.markSupported != nil {
 		return *c.markSupported
 	}
-	ok := false
-	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
-	if err == nil {
-		err = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_MARK, 0x1000)
-		unix.Close(fd)
-		ok = err == nil
-	}
-	if !ok {
-		log.Warningf("fbtenant: cannot set SO_MARK on sockets (CAP_NET_ADMIN missing?); dns_via_tunnel falls back to unmarked queries")
-	}
-	c.markSupported = &ok
-	return ok
+	return false
 }
 
 // spec parses and caches one upstream address; nil for unparseable ones.

@@ -47,30 +47,28 @@ func TestKeeperDueAndLifecycle(t *testing.T) {
 		t.Fatalf("record not due inside window: %+v", d)
 	}
 
-	// A failed resolve keeps the record; the third one drops it.
-	if k.failed("a.example") {
-		t.Fatal("dropped after 1 failure")
+	// A transport failure postpones the retry; the record survives.
+	k.postpone("a.example", now)
+	if k.len() != 1 {
+		t.Fatalf("record dropped on transport failure: %d", k.len())
 	}
-	if k.failed("a.example") {
-		t.Fatal("dropped after 2 failures")
+	if d := k.due(now.Add(keeperRetryBackoff / 2)); len(d) != 0 {
+		t.Fatalf("record due too soon after postpone: %+v", d)
 	}
-	if !k.failed("a.example") {
-		t.Fatal("not dropped after 3 failures")
-	}
-	k.remove("a.example") // the caller drops the record once failed reports true
+	k.remove("a.example")
 	if k.len() != 0 {
 		t.Fatalf("registry not cleared: %d records", k.len())
 	}
 
 	// refreshed resets failures and re-arms the deadline.
 	k.register("b.example", SetExcDNS, 600*time.Second, now.Add(50*time.Second))
-	k.failed("b.example")
+	k.postpone("b.example", now)
 	k.refreshed("b.example", 600*time.Second, now)
 	if d := k.due(now); len(d) != 0 {
 		t.Fatalf("record due right after refresh: %+v", d)
 	}
 	domains, refreshes, errors, last := k.stats()
-	if domains != 1 || refreshes != 1 || errors != 4 || last.IsZero() {
+	if domains != 1 || refreshes != 1 || errors != 2 || last.IsZero() {
 		t.Fatalf("stats = %d/%d/%d/%v", domains, refreshes, errors, last)
 	}
 }
@@ -230,6 +228,10 @@ func TestKeeperPassRefreshesDueDomain(t *testing.T) {
 	ops := newMockNFT()
 	st := testState()
 	st.Tenants[0].DNSKeepAlive = true
+	// keep the seed set to exactly the domain under test: setConfig seeds
+	// include/exclude domains into the keeper registry
+	st.Tenants[0].IncludeDomains = []string{"www.example.com"}
+	st.Tenants[0].ExcludeDomains = nil
 	h := &countedHandler{ttl: 120, perName: map[string]string{"www.example.com": "9.9.9.9"}}
 	st.Tenants[0].Upstreams = []string{startUDPServer(t, h)}
 	f := newTestPlugin(t, st, ops)
@@ -281,6 +283,9 @@ func TestKeeperPassNXDOMAINDropsRecord(t *testing.T) {
 	ops := newMockNFT()
 	st := testState()
 	st.Tenants[0].DNSKeepAlive = true
+	// no include/exclude domains: this test registers its records directly
+	st.Tenants[0].IncludeDomains = nil
+	st.Tenants[0].ExcludeDomains = nil
 	h := &countedHandler{ttl: 120, nxFor: map[string]bool{"gone.example": true}}
 	st.Tenants[0].Upstreams = []string{startUDPServer(t, h)}
 	f := newTestPlugin(t, st, ops)
@@ -296,28 +301,44 @@ func TestKeeperPassNXDOMAINDropsRecord(t *testing.T) {
 	}
 }
 
-// Three consecutive upstream failures drop the record back to passive
-// learning.
-func TestKeeperPassDropsAfterFailures(t *testing.T) {
+// Transport failures (timeout/refused) postpone the record's retry instead
+// of dropping it: a rate-limited or briefly down upstream fails every
+// domain alike and must not un-track listed domains.
+func TestKeeperPassPostponesAfterFailures(t *testing.T) {
 	ops := newMockNFT()
 	st := testState()
 	st.Tenants[0].DNSKeepAlive = true
+	// no include/exclude domains: this test registers its records directly
+	st.Tenants[0].IncludeDomains = nil
+	st.Tenants[0].ExcludeDomains = nil
 	st.Tenants[0].Upstreams = []string{"127.0.0.1:1"} // nothing listens
 	f := newTestPlugin(t, st, ops)
 
 	k := f.getKeeper("tenant1")
 	k.register("down.example", SetIncDNS, 120*time.Second, time.Now().Add(50*time.Second))
-	for i := int64(1); i <= 2; i++ {
-		f.keeperPass(context.Background())
-		waitFor(t, 3*time.Second, 10*time.Millisecond, "failure counted", func() bool {
-			_, _, errs, _ := k.stats()
-			return errs >= i
-		})
-	}
 	f.keeperPass(context.Background())
-	waitFor(t, 3*time.Second, 10*time.Millisecond, "record dropped after 3 failures", func() bool {
-		return k.len() == 0
+	waitFor(t, 3*time.Second, 10*time.Millisecond, "failure counted", func() bool {
+		_, _, errs, _ := k.stats()
+		return errs >= 1
 	})
+	k.mu.Lock()
+	r, ok := k.records["down.example"]
+	k.mu.Unlock()
+	if !ok {
+		t.Fatal("record dropped on transport failures")
+	}
+	if d := k.due(time.Now()); len(d) != 0 {
+		t.Fatalf("record still due immediately after failure: %+v", d)
+	}
+	if time.Until(r.deadline) < keeperRetryBackoff {
+		t.Fatalf("retry not postponed: deadline in %v", time.Until(r.deadline))
+	}
+	// an immediate second pass must not hammer the postponed record
+	f.keeperPass(context.Background())
+	time.Sleep(100 * time.Millisecond)
+	if _, _, errs, _ := k.stats(); errs != 1 {
+		t.Fatalf("postponed record retried immediately: errs=%d", errs)
+	}
 }
 
 // The binary registry survives a plugin restart (new instance, same file).

@@ -32,6 +32,7 @@ type FBTenant struct {
 	statusInterval time.Duration
 	keeperInterval time.Duration
 	keeperSem      chan struct{}
+	passRunning    atomic.Bool              // a keeper drain pass is in flight
 	keepers        map[string]*tenantKeeper // tenant ID -> registry, survives config reloads
 	keeperMu       sync.Mutex
 	keeperFile     string // binary registry next to the state file
@@ -94,6 +95,40 @@ func (f *FBTenant) setConfig(cfg *config) {
 	}
 	f.mirMu.Unlock()
 	f.cfg.Store(cfg)
+	f.seedKeepers(cfg)
+}
+
+// seedKeepers registers every configured include/exclude domain of keepalive
+// tenants in the keeper registry, due for an immediate refresh. Without
+// seeding, a listed domain enters inc_dns only after some client's DNS query
+// reaches the plugin — client resolver caches (up to the answer TTL) delay
+// that by minutes after the domain is added to a list. Seeded domains are
+// resolved proactively on the next keeper scan and then maintained like any
+// learned domain; the conntrack flush on their first learn re-routes
+// established flows at once. Domains already in the registry keep their
+// deadlines.
+func (f *FBTenant) seedKeepers(cfg *config) {
+	if cfg == nil {
+		return
+	}
+	now := time.Now()
+	seedTimeout := time.Duration(cfg.state.TTLMinSec) * time.Second
+	if seedTimeout <= 0 {
+		seedTimeout = time.Minute
+	}
+	for _, t := range cfg.tenants {
+		if !t.keepalive {
+			continue
+		}
+		k := f.getKeeper(t.raw.ID)
+		// excludes win over includes, mirroring learnTarget
+		for _, d := range t.raw.ExcludeDomains {
+			k.registerIfAbsent(d, SetExcDNS, seedTimeout, now)
+		}
+		for _, d := range t.raw.IncludeDomains {
+			k.registerIfAbsent(d, SetIncDNS, seedTimeout, now)
+		}
+	}
 }
 
 // setNFTOpsForTest replaces the nftables backend (mirrors must not exist yet).
