@@ -48,7 +48,7 @@ type Tenant struct {
 	VLESSURI    string
 	VLESS       VLESS
 	Fallback    string // main | strict
-	RoutingMode string // select | invert
+	RoutingMode string // select | invert | select-strict
 
 	IncludeSubnets []string
 	IncludeDomains []string
@@ -327,8 +327,21 @@ func (c *Config) Validate() []error {
 		if t.Fallback != "main" && t.Fallback != "strict" {
 			errs = append(errs, fmt.Errorf("%s: bad fallback %q", pfx, t.Fallback))
 		}
-		if t.RoutingMode != "select" && t.RoutingMode != "invert" {
+		if t.RoutingMode != "select" && t.RoutingMode != "invert" && t.RoutingMode != "select-strict" {
 			errs = append(errs, fmt.Errorf("%s: bad routing_mode %q", pfx, t.RoutingMode))
+		}
+		if t.RoutingMode == "select-strict" {
+			// Without the DNS hijack nothing can ever be classified and the
+			// terminal drop rule would blackhole the whole tenant.
+			if !t.DNSHijack {
+				errs = append(errs, fmt.Errorf("%s: routing_mode select-strict requires dns_hijack 1", pfx))
+			}
+			// fallback main would send marked (included) traffic out the plain
+			// WAN whenever the channel is down — the exact leak select-strict
+			// exists to prevent.
+			if t.Fallback != "strict" {
+				errs = append(errs, fmt.Errorf("%s: routing_mode select-strict requires fallback strict", pfx))
+			}
 		}
 		for _, n := range append(append([]string{}, t.IncludeSubnets...), t.ExcludeSubnets...) {
 			if _, _, err := net.ParseCIDR(n); err != nil {

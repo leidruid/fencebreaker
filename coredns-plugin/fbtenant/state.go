@@ -193,6 +193,9 @@ func matchSuffix(domain, suffix string) bool {
 //     channel — in invert mode the catch-all mark would otherwise capture
 //     them, and in select mode an exclude must override an include subnet;
 //   - select mode: include suffixes → inc_dns, others not learned;
+//   - select-strict mode: same, but everything else → exc_dns — the daemon
+//     installs a terminal drop for unclassified destinations, so every
+//     answered domain must land in a set or the client gets blackholed;
 //   - invert mode: everything else → inc_dns.
 func (t *preparedTenant) learnTarget(qname string) string {
 	for _, d := range t.raw.ExcludeDomains {
@@ -208,11 +211,25 @@ func (t *preparedTenant) learnTarget(qname string) string {
 			}
 		}
 		return ""
+	case "select-strict":
+		for _, d := range t.raw.IncludeDomains {
+			if matchSuffix(qname, d) {
+				return SetIncDNS
+			}
+		}
+		return SetExcDNS
 	case "invert":
 		return SetIncDNS
 	default:
 		return ""
 	}
+}
+
+// strictSelect reports whether the tenant runs routing_mode select-strict:
+// an unclassified destination is dropped by the nft ruleset, so learning
+// failures turn into SERVFAIL and cache hits must re-arm expired elements.
+func (t *preparedTenant) strictSelect() bool {
+	return t.raw.LearningMode == "select-strict"
 }
 
 // setName returns the nftables set name for a set kind, or "".

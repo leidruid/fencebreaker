@@ -120,6 +120,47 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+func TestValidateSelectStrict(t *testing.T) {
+	base := `
+config tenant
+	option id 's'
+	option enabled '1'
+	option egress_mode 'interface'
+	option egress_interface 'wan2'
+	list networks 'lan'
+`
+	mk := func(extra string) []error {
+		cfg, _ := uci.Parse([]byte(base + extra))
+		m, _ := FromUCI(cfg)
+		return m.Validate()
+	}
+	has := func(errs []error, substr string) bool {
+		for _, e := range errs {
+			if strings.Contains(e.Error(), substr) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// dns_hijack defaults to 1, so this is the minimal valid strict tenant.
+	if errs := mk("option routing_mode 'select-strict'\n\toption fallback 'strict'"); len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	// plain select keeps working with fallback main (default).
+	if errs := mk(""); len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+
+	if errs := mk("option routing_mode 'select-strict'"); !has(errs, "requires fallback strict") {
+		t.Errorf("missing fallback error, got: %v", errs)
+	}
+	errs := mk("option routing_mode 'select-strict'\n\toption fallback 'strict'\n\toption dns_hijack '0'")
+	if !has(errs, "requires dns_hijack 1") {
+		t.Errorf("missing dns_hijack error, got: %v", errs)
+	}
+}
+
 func TestVLESSValidation(t *testing.T) {
 	cfg, _ := uci.Parse([]byte(`
 config tenant

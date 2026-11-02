@@ -22,6 +22,9 @@ else инвертированный режим\n(routing_mode=invert)
   pre -> pre : всё, кроме исключений:\nmeta mark set 0x1000
   pre -> route : fwmark → таблица t{N}
   route -> egress : default via канал
+else строгий режим\n(routing_mode=select-strict)
+  pre -> pre : multicast/broadcast/local/:53\n— accept (жизнь самого тенанта)
+  pre -> pre : прочее неклассифицированное\n— drop: до классификации адреса\nпакет не маршрутизируется вообще
 end
 
 alt egress_mode = interface
@@ -35,6 +38,14 @@ note over pre
   новые соединения): DNS-адрес в наборе
   живёт, пока активен timeout-элемент —
   либо его продляет keep-alive.
+end note
+note over pre, client
+  select-strict: элемент попадает в набор
+  синхронно ДО отправки DNS-ответа клиенту,
+  поэтому штатный путь (запрос → SYN) под
+  drop не попадает; клиент ретранслирует
+  SYN, и соединение проходит сразу после
+  классификации адреса.
 end note
 note over route, egress
   Канал недоступен:

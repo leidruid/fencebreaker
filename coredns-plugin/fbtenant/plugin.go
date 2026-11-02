@@ -199,6 +199,15 @@ func (f *FBTenant) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 	key := tenant.raw.ID + "|" + cacheKey(qname, qtype)
 	if hit := tenant.cache.get(key, time.Now()); hit != nil {
 		tenant.stats.cacheHits.Add(1)
+		// select-strict: the nft element may have expired while the cache
+		// entry is still live; re-arm it so the first packet is routed
+		// instead of dropped (AddIfAbsent skips live elements, so in the
+		// common case this is a no-op map check).
+		if qtype == dns.TypeA && hit.Rcode == dns.RcodeSuccess && len(hit.Answer) > 0 {
+			if !f.learnAnswer(cfg, tenant, qname, hit) {
+				return dns.RcodeServerFailure, w.WriteMsg(servfail(r))
+			}
+		}
 		return f.writeAnswer(w, r, hit), nil
 	}
 
@@ -224,8 +233,8 @@ func (f *FBTenant) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 	// Learning: A records of positive answers only; AAAA is resolved and
 	// returned but never learned. NXDOMAIN/empty answers are just returned.
 	if qtype == dns.TypeA && resp.Rcode == dns.RcodeSuccess && len(resp.Answer) > 0 {
-		if kind := tenant.learnTarget(qname); kind != "" {
-			f.learn(&cfg.state, tenant, kind, qname, resp, time.Now())
+		if !f.learnAnswer(cfg, tenant, qname, resp) {
+			return dns.RcodeServerFailure, w.WriteMsg(servfail(r))
 		}
 	}
 
@@ -239,15 +248,29 @@ func (f *FBTenant) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 	return f.writeAnswer(w, r, resp), nil
 }
 
+// learnAnswer classifies an A answer according to learnTarget and reports
+// whether the answer may be delivered to the client. In select-strict a
+// failed nft write leaves the destination unclassified — the ruleset would
+// drop the connection anyway — so the caller answers SERVFAIL instead and
+// the client retries.
+func (f *FBTenant) learnAnswer(cfg *config, tenant *preparedTenant, qname string, resp *dns.Msg) bool {
+	kind := tenant.learnTarget(qname)
+	if kind == "" {
+		return true
+	}
+	return f.learn(&cfg.state, tenant, kind, qname, resp, time.Now()) || !tenant.strictSelect()
+}
+
 // learn sends the A-record IPs of an answer to the tenant's nftables set
 // (kind is SetIncDNS or SetExcDNS) through the mirror; duplicate filtering
 // happens inside the mirror. With dns_keepalive the domain also joins the
-// tenant's keeper registry, aligned with the live element deadlines.
-func (f *FBTenant) learn(state *State, tenant *preparedTenant, kind, qname string, resp *dns.Msg, now time.Time) {
+// tenant's keeper registry, aligned with the live element deadlines. It
+// reports whether the IPs are guaranteed to be classified in nftables.
+func (f *FBTenant) learn(state *State, tenant *preparedTenant, kind, qname string, resp *dns.Msg, now time.Time) bool {
 	setName := tenant.setName(kind)
 	m := f.getMirrors()
 	if setName == "" || m == nil {
-		return
+		return false
 	}
 	var ips []string
 	qttl := time.Duration(0)
@@ -262,7 +285,7 @@ func (f *FBTenant) learn(state *State, tenant *preparedTenant, kind, qname strin
 		}
 	}
 	if len(ips) == 0 {
-		return
+		return true
 	}
 	timeout := clampTTL(qttl, ttlMin(state), ttlMax(state))
 	res := m.AddIfAbsent(setName, ips, timeout, now)
@@ -280,6 +303,7 @@ func (f *FBTenant) learn(state *State, tenant *preparedTenant, kind, qname strin
 		tenant.stats.setLastError(res.WriteErr.Error())
 		log.Warningf("fbtenant: tenant %s %v", tenant.raw.ID, res.WriteErr)
 		f.scheduleResyncSoon()
+		return false
 	}
 	if len(res.FlushIPs) > 0 {
 		// newly learned IPs: established flows still follow their original
@@ -287,7 +311,7 @@ func (f *FBTenant) learn(state *State, tenant *preparedTenant, kind, qname strin
 		f.flushConntrack(res.FlushIPs)
 	}
 	if !tenant.keepalive {
-		return
+		return true
 	}
 	// Align the keeper deadline with the mirror: duplicate-skipped elements
 	// keep their earlier deadline, which is when routing would break.
@@ -296,6 +320,7 @@ func (f *FBTenant) learn(state *State, tenant *preparedTenant, kind, qname strin
 		deadline = now.Add(timeout)
 	}
 	f.getKeeper(tenant.raw.ID).register(qname, kind, timeout, deadline)
+	return true
 }
 
 func (f *FBTenant) getMirrors() *mirrorManager {

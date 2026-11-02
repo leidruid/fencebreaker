@@ -594,6 +594,7 @@ return view.extend({
 		o = s.option(form.ListValue, 'routing_mode', _('Режим маршрутизации'));
 		o.value('select', _('select — маршрутизировать только указанные ресурсы'));
 		o.value('invert', _('invert — маршрутизировать всё, кроме указанных исключений'));
+		o.value('select-strict', _('select-strict — как select, но без маршрутизации неклассифицированного (требует fallback strict)'));
 		o.default = 'select';
 		o.rmempty = false;
 

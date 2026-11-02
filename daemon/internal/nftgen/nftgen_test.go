@@ -158,6 +158,116 @@ func TestRenderDropsNonIPv4(t *testing.T) {
 	}
 }
 
+// ---- select-strict (fail-closed) -------------------------------------------
+
+func strictInputs(t *testing.T) *Inputs {
+	t.Helper()
+	in := testInputs(t)
+	in.Config.Tenants[0].RoutingMode = "select-strict"
+	in.Config.Tenants[0].Fallback = "strict"
+	return in
+}
+
+func TestRenderSelectStrictChain(t *testing.T) {
+	out := Render(strictInputs(t))
+	// Every exc/inc match first, then the self-preservation exemptions and
+	// the terminal drop, in this order.
+	ordered := []string{
+		"ip daddr @t1_exc_geoip return",
+		"ip daddr @t1_exc_static return",
+		"ip daddr @t1_exc_dns return",
+		"ip daddr @t1_inc_geoip meta mark set 0x1000 return",
+		"ip daddr @t1_inc_static meta mark set 0x1000 return",
+		"ip daddr @t1_inc_dns meta mark set 0x1000 return",
+		"ip daddr 224.0.0.0/4 accept",
+		"ip daddr 255.255.255.255 accept",
+		"fib daddr type local accept",
+		"udp dport 53 accept",
+		"tcp dport 53 accept",
+		"drop",
+	}
+	pos := 0
+	for _, want := range ordered {
+		i := strings.Index(out[pos:], want)
+		if i < 0 {
+			t.Fatalf("ruleset missing %q after %q:\n%s", want, ordered[0], out)
+		}
+		pos += i + len(want)
+	}
+	if strings.Contains(out, "# invert") {
+		t.Error("select-strict must not render the invert catch-all")
+	}
+}
+
+// setBlock extracts one rendered set definition from a ruleset.
+func setBlock(out, name string) string {
+	start := strings.Index(out, "set "+name+" {")
+	if start < 0 {
+		return ""
+	}
+	end := strings.Index(out[start:], "\n\t}")
+	return out[start : start+end]
+}
+
+// Static record overrides must be classified: include-matched → inc_static,
+// exclude-matched → exc_static, and in select-strict everything else →
+// exc_static too (otherwise the terminal drop blackholes record targets).
+// In plain select mode unmatched records stay unclassified.
+func TestRenderRecordsClassified(t *testing.T) {
+	mkRules := func(t0 *model.Tenant) {
+		t0.IncludeDomains = []string{"example.com"}
+		t0.ExcludeDomains = []string{"bank.ru"}
+		t0.DNSRules = []model.DNSRule{
+			{Tenant: t0.ID, Type: "record", Domain: "www.example.com", Targets: []string{"1.2.3.4"}},
+			{Tenant: t0.ID, Type: "record", Domain: "api.bank.ru", Targets: []string{"5.6.7.8"}},
+			{Tenant: t0.ID, Type: "record", Domain: "misc.net", Targets: []string{"9.9.9.9"}},
+			{Tenant: t0.ID, Type: "record", Domain: "bad.net", Targets: []string{"not-an-ip", "2.2.2.2"}},
+		}
+	}
+
+	in := strictInputs(t)
+	mkRules(in.Config.Tenants[0])
+	out := Render(in)
+	if blk := setBlock(out, "t1_inc_static"); !strings.Contains(blk, "1.2.3.4") {
+		t.Errorf("include-matched record not in inc_static: %q", blk)
+	}
+	if blk := setBlock(out, "t1_exc_static"); !strings.Contains(blk, "5.6.7.8") || !strings.Contains(blk, "9.9.9.9") || !strings.Contains(blk, "2.2.2.2") {
+		t.Errorf("exclude/unmatched records not in exc_static: %q", blk)
+	}
+	if strings.Contains(out, "not-an-ip") {
+		t.Error("non-IP record target leaked into the ruleset")
+	}
+
+	in2 := testInputs(t)
+	in2.Config.Tenants[0].RoutingMode = "select"
+	mkRules(in2.Config.Tenants[0])
+	out2 := Render(in2)
+	if blk := setBlock(out2, "t1_inc_static"); !strings.Contains(blk, "1.2.3.4") {
+		t.Errorf("select: include-matched record not in inc_static: %q", blk)
+	}
+	if blk := setBlock(out2, "t1_exc_static"); strings.Contains(blk, "9.9.9.9") {
+		t.Errorf("select: unmatched record must stay unclassified: %q", blk)
+	}
+}
+
+// TestNftCheckSelectStrict validates the fail-closed chain (notably the fib
+// expression) with nft -c when the environment allows it.
+func TestNftCheckSelectStrict(t *testing.T) {
+	nftPath, err := exec.LookPath("nft")
+	if err != nil {
+		t.Skip("nft not installed")
+	}
+	if out, err := exec.Command(nftPath, "list", "tables").CombinedOutput(); err != nil {
+		t.Skipf("nftables unavailable: %v: %s", err, out)
+	}
+	out := Render(strictInputs(t))
+	cmd := exec.Command(nftPath, "-c", "-f", "-")
+	cmd.Stdin = strings.NewReader(out)
+	if o, err := cmd.CombinedOutput(); err != nil {
+		t.Errorf("nft -c rejected ruleset: %v\n%s\n---ruleset---\n%s", err, o, out)
+	}
+}
+
 // TestNftCheck validates the rendered ruleset with the nft binary when the
 // environment allows it (nft -c needs CAP_NET_ADMIN and kernel nftables).
 func TestNftCheck(t *testing.T) {

@@ -16,9 +16,15 @@
   (flags timeout), `t{N}_exc_static`, `t{N}_exc_geoip` (interval),
   `t{N}_exc_dns` (timeout), `t{N}_src_nets` (interval), `t{N}_hosts_exc`,
   `t{N}_hosts_full`; глобальные агрегаты `all_src_nets` (interval),
-  `all_hosts_exc`. Цепочки: `dns_hijack` (nat prerouting, priority -200),
-  `mangle_fwd` (filter hook forward, priority -150), на тенанта — `t{N}_fwd`
-  (jump из mangle_fwd при `ip saddr @t{N}_src_nets` или `ip saddr @t{N}_hosts_full`).
+  `all_hosts_exc`. Цепочки: `dns_hijack` (nat prerouting, priority -150),
+  `mangle_pre` (filter hook prerouting, priority -150), на тенанта — `t{N}_fwd`
+  (jump из mangle_pre при `ip saddr @t{N}_src_nets` или `ip saddr @t{N}_hosts_full`).
+  Порядок правил в `t{N}_fwd`: hosts-исключения → exc-наборы (return, без
+  метки) → inc-наборы (метка тенанта); для `routing_mode=invert` — катч-олл
+  с меткой, для `select-strict` — исключения самомаршрутизации
+  (multicast/broadcast, `fib daddr type local`, порты DNS до отработки
+  nat-redirect) и терминальный `drop`: неклассифицированный адрес не
+  маршрутизируется вообще.
 - IPv4 в v1; имена и структура выбраны совместимо с добавлением IPv6-наборов
   (`..._v6`) позже.
 
@@ -58,7 +64,7 @@ config tenant
     option vless_pbk '...'            # reality public key
     option vless_sid '...'            # reality short-id
     option fallback 'main'            # main | strict
-    option routing_mode 'select'      # select | invert
+    option routing_mode 'select'      # select | invert | select-strict
     list include_subnets '1.2.3.0/24'
     list include_domains 'example.com'
     list include_geoip 'ru'
@@ -139,10 +145,17 @@ re-apply (содержимое сохранено) generation не меняет�
 - Домен: точная запись из `records` → самый узкий суффикс из `forwards`
   (поддомены наследуют) → `upstreams` тенанта.
 - Обучение: `select` — домены из `include_domains` (суффиксы) → `inc_dns`;
-  `invert` — все остальные → `inc_dns`. Ответы доменов из `exclude_domains`
-  всегда обучаются в `exc_dns` (в invert режиме их обязаны накрывать
-  исключения, а не catch-all; в select — исключение сильнее include-подсети).
-  Кандидаты — A-записи.
+  `invert` — все остальные → `inc_dns`; `select-strict` — include-домены →
+  `inc_dns`, **все прочие → `exc_dns`** (у strict-тенанта nft-цепочка
+  заканчивается терминальным drop: неклассифицированный адрес не
+  маршрутизируется, поэтому классифицировано должно быть всё). Ответы доменов
+  из `exclude_domains` всегда обучаются в `exc_dns` (в invert режиме их
+  обязаны накрывать исключения, а не catch-all; в select — исключение сильнее
+  include-подсети). Кандидаты — A-записи.
+- `select-strict` дополнительно: сбой записи элемента в nft → клиенту
+  SERVFAIL вместо ответа (адрес остался бы неклассифицированным и был бы
+  сброшен правилами); cache-hit повторно прогоняет обучение — элемент мог
+  истечь при живом кэше.
 - `dns_via_tunnel=true` → исходящие upstream-запросы с `SO_MARK=mark`.
 - `learning_mode` соответствует `routing_mode` тенанта.
 

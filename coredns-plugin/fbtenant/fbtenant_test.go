@@ -3,6 +3,7 @@ package fbtenant
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -176,6 +177,125 @@ func TestServeDNSCacheHitsPerTenant(t *testing.T) {
 	sts := f.tenantStatuses()
 	if sts["tenant1"].CacheHits != 2 {
 		t.Fatalf("cache_hits = %d, want 2", sts["tenant1"].CacheHits)
+	}
+}
+
+// ---- ServeDNS: select-strict (fail-closed) ----------------------------------
+
+// Non-included domains are learned into exc_dns: the ruleset drops
+// unclassified destinations, so every answered domain must land in a set.
+func TestServeDNSStrictLearnsNonIncludedIntoExc(t *testing.T) {
+	ops := newMockNFT()
+	st := testState()
+	st.Tenants[0].LearningMode = "select-strict"
+	h := &countedHandler{ttl: 120, perName: map[string]string{
+		"www.example.com": "9.9.9.9",
+		"bank.ru":         "8.8.8.8", // outside include_domains
+	}}
+	st.Tenants[0].Upstreams = []string{startUDPServer(t, h)}
+	f := newTestPlugin(t, st, ops)
+
+	rec, r := query("www.example.com", dns.TypeA, "192.168.100.5")
+	if _, err := serve(f, rec, r); err != nil {
+		t.Fatalf("ServeDNS: %v", err)
+	}
+	if len(ops.adds) != 1 || ops.adds[0].set != "t1_inc_dns" {
+		t.Fatalf("include learn: %+v", ops.adds)
+	}
+
+	rec2, r2 := query("bank.ru", dns.TypeA, "192.168.100.5")
+	if _, err := serve(f, rec2, r2); err != nil {
+		t.Fatalf("ServeDNS 2: %v", err)
+	}
+	if got := answerIP(rec2.Msg); got != "8.8.8.8" {
+		t.Fatalf("answer = %q", got)
+	}
+	if len(ops.adds) != 2 || ops.adds[1].set != "t1_exc_dns" {
+		t.Fatalf("non-include domain must land in exc_dns: %+v", ops.adds)
+	}
+}
+
+// A failed nft write must not answer with IPs the ruleset would drop:
+// select-strict replies SERVFAIL so the client retries; in plain select the
+// answer still goes out (resync reconciles the element later).
+func TestServeDNSStrictServfailOnLearnError(t *testing.T) {
+	ops := newMockNFT()
+	ops.addErr["t1_inc_dns"] = errors.New("nft broken")
+	st := testState()
+	st.Tenants[0].LearningMode = "select-strict"
+	h := &countedHandler{aIP: ip4("9.9.9.9"), ttl: 120}
+	st.Tenants[0].Upstreams = []string{startUDPServer(t, h)}
+	f := newTestPlugin(t, st, ops)
+
+	rec, r := query("www.example.com", dns.TypeA, "192.168.100.5")
+	if _, err := serve(f, rec, r); err != nil {
+		t.Fatalf("ServeDNS: %v", err)
+	}
+	if rec.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("rcode = %d, want SERVFAIL", rec.Rcode)
+	}
+	// The failed answer must not be cached: the retry goes upstream again.
+	rec2, r2 := query("www.example.com", dns.TypeA, "192.168.100.5")
+	if _, err := serve(f, rec2, r2); err != nil {
+		t.Fatalf("ServeDNS 2: %v", err)
+	}
+	if h.hits() != 2 {
+		t.Fatalf("upstream hits = %d; failed answer was cached", h.hits())
+	}
+
+	ops2 := newMockNFT()
+	ops2.addErr["t1_inc_dns"] = errors.New("nft broken")
+	st2 := testState()
+	st2.Tenants[0].Upstreams = []string{startUDPServer(t, h)}
+	f2 := newTestPlugin(t, st2, ops2)
+	rec3, r3 := query("www.example.com", dns.TypeA, "192.168.100.5")
+	if _, err := serve(f2, rec3, r3); err != nil {
+		t.Fatalf("ServeDNS 3: %v", err)
+	}
+	if rec3.Rcode != dns.RcodeSuccess || answerIP(rec3.Msg) != "9.9.9.9" {
+		t.Fatalf("select mode answer: rcode=%d msg=%v", rec3.Rcode, rec3.Msg)
+	}
+}
+
+// Cache hits re-arm expired nft elements: the plugin cache can outlive the
+// element, and in select-strict a stale element would drop the client's
+// first packet instead of routing it.
+func TestServeDNSStrictCacheHitRelearnsExpired(t *testing.T) {
+	ops := newMockNFT()
+	st := testState()
+	st.Tenants[0].LearningMode = "select-strict"
+	h := &countedHandler{aIP: ip4("9.9.9.9"), ttl: 120}
+	st.Tenants[0].Upstreams = []string{startUDPServer(t, h)}
+	f := newTestPlugin(t, st, ops)
+
+	rec, r := query("www.example.com", dns.TypeA, "192.168.100.5")
+	if _, err := serve(f, rec, r); err != nil {
+		t.Fatalf("ServeDNS: %v", err)
+	}
+	if ops.addCount() != 1 {
+		t.Fatalf("initial learn: %d adds", ops.addCount())
+	}
+
+	// Expire the mirrored element while the cache entry is still live.
+	m := f.getMirrors()
+	m.mu.Lock()
+	for ip, e := range m.sets["t1_inc_dns"].entries {
+		m.sets["t1_inc_dns"].entries[ip] = mirrorEntry{deadline: time.Now().Add(-time.Second), timeout: e.timeout}
+	}
+	m.mu.Unlock()
+
+	rec2, r2 := query("www.example.com", dns.TypeA, "192.168.100.5")
+	if _, err := serve(f, rec2, r2); err != nil {
+		t.Fatalf("ServeDNS 2: %v", err)
+	}
+	if got := answerIP(rec2.Msg); got != "9.9.9.9" {
+		t.Fatalf("answer = %q", got)
+	}
+	if h.hits() != 1 {
+		t.Fatalf("upstream hits = %d; expected a cache hit", h.hits())
+	}
+	if ops.addCount() != 2 {
+		t.Fatalf("expired element not re-armed on cache hit: %d adds", ops.addCount())
 	}
 }
 

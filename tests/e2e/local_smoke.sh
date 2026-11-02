@@ -45,9 +45,27 @@ config tenant
 	list excluded_hosts '192.168.77.6'
 	list dns_upstream '1.1.1.1'
 
+config tenant
+	option id 'smoke2'
+	option name 'SmokeStrict'
+	option enabled '1'
+	option egress_mode 'interface'
+	option egress_interface 'eth0'
+	option routing_mode 'select-strict'
+	option fallback 'strict'
+	list include_domains 'example.com'
+	list networks '192.168.78.0/24'
+	list dns_upstream '1.1.1.1'
+
+config dnsrule
+	option tenant 'smoke2'
+	option type 'record'
+	option domain 'internal.corp'
+	list target '10.5.5.5'
+
 config list
 	option name 'bl'
-	option url 'http://127.0.0.1:1/none.txt'
+	option url 'http://list.invalid/none.txt'
 	option refresh '0'
 EOF
 
@@ -57,7 +75,9 @@ cleanup() {
     wait "$PID" 2>/dev/null || true
     nft delete table inet fencebreaker 2>/dev/null || true
     ip rule del pref 11010 2>/dev/null || true
+    ip rule del pref 11020 2>/dev/null || true
     ip route flush table 101 2>/dev/null || true
+    ip route flush table 102 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -98,6 +118,14 @@ check "dns_state.json written"      "grep -q '\"generation\"' \"$WORK/run/dns_st
 check "dns_state tenant mark"       "grep -q '\"mark\": 4096' \"$WORK/run/dns_state.json\""
 check "status.json written"         "grep -q '\"tenants\"' \"$WORK/run/status.json\""
 check "Corefile generated"          "grep -q 'fbtenant' \"$WORK/run/Corefile\""
+
+# select-strict tenant: terminal drop + self-preservation exemptions
+check "strict: terminal drop"       "echo \"\$NFT\" | grep -A2 'udp dport 53 accept' | grep -qw 'drop'"
+check "strict: fib local exempt"    "echo \"\$NFT\" | grep -q 'fib daddr type local accept'"
+check "strict: multicast exempt"    "echo \"\$NFT\" | grep -q 'ip daddr 224.0.0.0/4 accept'"
+check "strict: dns port exempt"     "echo \"\$NFT\" | grep -q 'tcp dport 53 accept'"
+check "strict: record classified"   "echo \"\$NFT\" | grep -q '10.5.5.5'"
+check "strict: drop after includes" "[ \"\$(echo \"\$NFT\" | grep -n 't2_inc_dns meta mark set' | head -1 | cut -d: -f1)\" -lt \"\$(echo \"\$NFT\" | grep -n 'fib daddr type local' | head -1 | cut -d: -f1)\" ]"
 
 ip route show table 101 | sed 's/^/  table101: /'
 

@@ -77,7 +77,7 @@
 | `enabled` | bool | `1` | Включён ли тенант. Требования к каналу проверяются только для включённых. |
 | `priority` | int | `100` | Меньшее число — важнее. Учитывается при конфликте полных хостов (`full_hosts`) между тенантами. |
 | `fallback` | `main` \| `strict` | `main` | Поведение при падении канала: `main` — трафик тенанта идёт по основной таблице (обычный роутинг); `strict` — трафик тенанта блокируется до восстановления канала. |
-| `routing_mode` | `select` \| `invert` | `select` | Режим маршрутизации, см. ниже. |
+| `routing_mode` | `select` \| `invert` \| `select-strict` | `select` | Режим маршрутизации, см. ниже. |
 
 **`routing_mode` подробно.**
 
@@ -92,6 +92,22 @@
   `exclude_subnets`/`exclude_geoip`. Опции `include_*` в этом режиме не
   используются. Типичный сценарий — «всё через туннель, кроме локальных
   банков и сайтов своей страны» (пример 3 ниже).
+- **`select-strict`** — как `select`, но fail-closed: пакет на адрес, который
+  ещё не классифицирован (не попал ни в один include/exclude-набор), **не
+  маршрутизируется вообще** — тихий drop в конце цепочки тенанта, а не уход
+  в WAN по основной таблице. Клиент ретранслирует SYN, и как только адрес
+  изучен (элемент добавляется в nft синхронно *до* отправки DNS-ответа
+  клиенту), соединение идёт правильным путём. Чтобы «обычный интернет»
+  тенанта продолжал работать напрямую, все отвеченные не-include домены
+  изучаются в `exc_dns`. Требует `dns_hijack 1` и `fallback strict`
+  (проверяется при валидации). Ограничения: трафик на хардкод-IP, сторонний
+  DoH и в другие локальные подсети за роутером (LAN-to-LAN — тоже мимо
+  перехвата DNS) от клиентов тенанта ходить перестанет — такие адреса и
+  подсети нужно явно перечислять (`include_subnets`/`exclude_subnets`);
+  IPv6 по-прежнему вне fence; окно до первого apply при загрузке не
+  охраняется. Не классифицированные до истечения элементы (`max_set_size`
+  eviction) означают drop, а не утечку — на нагруженных сетях поднимите
+  лимит и включите `dns_keepalive`.
 
 ### Канал (egress)
 
@@ -353,18 +369,46 @@ config list
 gov.example
 shop.example'
 
+	config tenant
+		option id 'tun-all'
+		option name 'All-through-tunnel'
+		option enabled '1'
+		option egress_mode 'interface'
+		option egress_interface 'wg0'
+		option fallback 'strict'
+		option routing_mode 'invert'
+		# всё, кроме исключений:
+		list exclude_domains 'bank.example'
+		list exclude_lists 'local-banks'
+		list exclude_geoip 'ru'
+		list networks 'lan'
+		option dns_hijack '1'
+		option dns_via_tunnel '1'
+		option dns_keepalive '1'
+		list dns_upstream '1.1.1.1'
+```
+
+### 4. Select-strict: ничего неклассифицированного не покидает роутер
+
+Как пример 1 (через канал — только перечисленное), но fail-closed: пока
+адрес не изучен через DNS, пакеты на него **не маршрутизируются вовсе**
+(тихий drop), а не уходят в WAN. Всё, что прошло через перехват DNS,
+классифицируется: include-домена → в канал, остальное → напрямую.
+Хардкод-IP, сторонний DoH и другие локальные подсети роутера от клиентов
+тенанта ходить перестанут — добавляйте их явно (`include_subnets` /
+`exclude_subnets`).
+
+```sh
 config tenant
-	option id 'tun-all'
-	option name 'All-through-tunnel'
+	option id 'corp'
+	option name 'Corporate-fail-closed'
 	option enabled '1'
 	option egress_mode 'interface'
 	option egress_interface 'wg0'
+	option routing_mode 'select-strict'
 	option fallback 'strict'
-	option routing_mode 'invert'
-	# всё, кроме исключений:
-	list exclude_domains 'bank.example'
-	list exclude_lists 'local-banks'
-	list exclude_geoip 'ru'
+	list include_domains 'corp.example'
+	list include_subnets '10.9.0.0/16'
 	list networks 'lan'
 	option dns_hijack '1'
 	option dns_via_tunnel '1'
@@ -430,7 +474,9 @@ netstat -lnup | grep 1053
 | `tls requires sni` | `security=tls` без `sni`. |
 | `unknown vless_security` / `unknown security` | Недопустимое значение security (только `reality`, `tls`, `none`). |
 | `vless_uri: transport ... not supported` | В `vless_uri` параметр `type` отличный от `tcp`. |
-| `bad egress_mode` / `bad fallback` / `bad routing_mode` | Значение вне допустимых (`interface\|vless`, `main\|strict`, `select\|invert`). |
+| `bad egress_mode` / `bad fallback` / `bad routing_mode` | Значение вне допустимых (`interface\|vless`, `main\|strict`, `select\|invert\|select-strict`). |
+| `routing_mode select-strict requires dns_hijack 1` | Без перехвата DNS в strict-режиме некому классифицировать адреса — тенант был бы полностью заблокирован. |
+| `routing_mode select-strict requires fallback strict` | При `fallback main` включённый трафик утекал бы в WAN при падении канала — ровно то, что strict-режим запрещает. |
 | `bad subnet "…"` | Запись в `include_subnets`/`exclude_subnets` не CIDRv4 (нужен `/маска`). |
 | `bad host "…"` | `excluded_hosts`/`full_hosts` должны быть IP-адресами. |
 | `at least one network is required` | У тенанта пустой `networks`. |

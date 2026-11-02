@@ -175,6 +175,13 @@ func TestLearnTargetTable(t *testing.T) {
 		{"select", "sub.bank.ru", SetExcDNS},
 		{"select", "other.net", ""},
 		{"select", "notexample.com", ""}, // suffix must be label-aligned
+		// select-strict: like select, but everything else lands in exc_dns —
+		// the daemon's terminal drop would blackhole unclassified traffic
+		{"select-strict", "www.example.com", SetIncDNS},
+		{"select-strict", "bank.ru", SetExcDNS},
+		{"select-strict", "sub.bank.ru", SetExcDNS},
+		{"select-strict", "other.net", SetExcDNS},
+		{"select-strict", "notexample.com", SetExcDNS},
 		{"invert", "www.example.com", SetIncDNS},
 		{"invert", "anything.net", SetIncDNS},
 		{"invert", "bank.ru", SetExcDNS},

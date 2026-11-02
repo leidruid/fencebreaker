@@ -88,6 +88,25 @@ func Render(in *Inputs) string {
 			}
 			excGeo = append(excGeo, canonCIDRs(cidrs)...)
 		}
+		// Static record overrides are answered by the plugin without any
+		// learning, so their IPs must be classified here: exclude suffixes
+		// win, then include suffixes (same matching learnTarget applies to
+		// live queries). In select-strict everything must end up in a set or
+		// the terminal drop blackholes the record target.
+		incD, excD := tenantDomainSuffixes(t, in)
+		for _, r := range t.DNSRules {
+			if r.Type != "record" {
+				continue
+			}
+		switch {
+		case matchAnySuffix(r.Domain, excD):
+			excStatic = append(excStatic, canonIPs(r.Targets)...)
+		case matchAnySuffix(r.Domain, incD):
+			incStatic = append(incStatic, canonIPs(r.Targets)...)
+		case t.RoutingMode == "select-strict":
+			excStatic = append(excStatic, canonIPs(r.Targets)...)
+		}
+		}
 		renderAddrSet(&b, s.IncStatic, true, dedup(incStatic))
 		renderAddrSet(&b, s.ExcStatic, true, dedup(excStatic))
 		renderAddrSet(&b, s.IncGeoIP, true, dedup(incGeo))
@@ -146,6 +165,26 @@ func Render(in *Inputs) string {
 			w("\t\t# invert: everything else from this tenant goes through the channel")
 			w("\t\tmeta mark set %s return", mark)
 		}
+		if t.RoutingMode == "select-strict" {
+			// select-strict: a destination that is classified neither as an
+			// exception nor as an include is not routed at all — the client
+			// retransmits and the next attempt goes through the right channel
+			// once the address is learned. Everything below only keeps the
+			// tenant itself functional until then.
+			w("\t\t# select-strict: unclassified destinations are not routed at all")
+			w("\t\tip daddr 224.0.0.0/4 accept")
+			w("\t\tip daddr 255.255.255.255 accept")
+			// The router itself: LuCI/SSH/dnsmasq, and hijacked DNS after the
+			// nat redirect rewrites it to a local address. Local-table lookup
+			// (ip rule prio 0) already wins over any fwmark rule, so accepting
+			// here only skips the drop.
+			w("\t\tfib daddr type local accept")
+			// Plain :53 before the nat redirect runs: nat and filter prerouting
+			// share priority -150 and their relative order is not guaranteed.
+			w("\t\tudp dport 53 accept")
+			w("\t\ttcp dport 53 accept")
+			w("\t\tdrop")
+		}
 		w("\t}")
 	}
 	w("}")
@@ -189,6 +228,38 @@ func renderDNSSet(b *strings.Builder, name string, ttlMax int, restore []Elem) {
 }
 
 // ---- helpers ----
+
+// tenantDomainSuffixes merges the tenant's include/exclude domain suffixes
+// with the domain parts of its subscribed lists — the same universe of
+// suffixes the fbtenant plugin matches against (learnTarget).
+func tenantDomainSuffixes(t *model.Tenant, in *Inputs) (inc, exc []string) {
+	inc = append(inc, t.IncludeDomains...)
+	exc = append(exc, t.ExcludeDomains...)
+	for _, name := range t.IncludeLists {
+		if l := in.Lists[name]; l != nil {
+			inc = append(inc, l.Domains...)
+		}
+	}
+	for _, name := range t.ExcludeLists {
+		if l := in.Lists[name]; l != nil {
+			exc = append(exc, l.Domains...)
+		}
+	}
+	return inc, exc
+}
+
+// matchAnySuffix reports whether domain equals one of suffixes or is a
+// subdomain of it (an empty suffix matches everything, as in the plugin).
+func matchAnySuffix(domain string, suffixes []string) bool {
+	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
+	for _, s := range suffixes {
+		s = strings.ToLower(strings.TrimSuffix(s, "."))
+		if s == "" || domain == s || strings.HasSuffix(domain, "."+s) {
+			return true
+		}
+	}
+	return false
+}
 
 // canonCIDRs canonicalizes CIDR strings, keeping only IPv4 prefixes. Every
 // address set is declared type ipv4_addr and fencebreaker routes IPv4 only;
