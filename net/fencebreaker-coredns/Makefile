@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=fencebreaker-coredns
 PKG_VERSION:=1.15.0
-PKG_RELEASE:=12
+PKG_RELEASE:=13
 
 PKG_SOURCE:=coredns-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/coredns/coredns/tar.gz/v$(PKG_VERSION)?

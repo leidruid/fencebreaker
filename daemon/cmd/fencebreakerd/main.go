@@ -15,7 +15,7 @@ import (
 )
 
 // Version is the daemon version string.
-const Version = "0.1.2"
+const Version = "0.2.0"
 
 func main() { os.Exit(run()) }
 
