@@ -70,6 +70,25 @@ func (c *Client) Apply(ctx context.Context, ruleset string) error {
 	return err
 }
 
+// ApplyReplacing swaps the table for a new ruleset in ONE nft -f transaction:
+// when the table already exists the delete is prepended to the same input
+// file, so there is no window where tenant traffic flows unmarked between
+// the old and the new ruleset. A failed transaction leaves the old table
+// fully intact (nothing to roll back).
+func (c *Client) ApplyReplacing(ctx context.Context, ruleset string) error {
+	var prelude string
+	if _, err := c.Backend.Run(ctx, []string{"list", "table", "inet", c.Table}, ""); err != nil {
+		if !strings.Contains(err.Error(), "No such file or directory") {
+			return fmt.Errorf("probe %s: %w", c.Table, err)
+		}
+		// table missing: nothing to delete, plain apply
+	} else {
+		prelude = fmt.Sprintf("delete table inet %s\n", c.Table)
+	}
+	_, err := c.Backend.Run(ctx, []string{"-f", "-"}, prelude+ruleset)
+	return err
+}
+
 // DumpSets returns the contents of the given sets (name → elements).
 // Missing table or set yields an empty map.
 type nftJSON struct {

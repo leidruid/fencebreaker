@@ -9,6 +9,7 @@ import (
 
 type fakeBackend struct {
 	calls   []string
+	stdins  []string // parallel to calls
 	outputs map[string]string // matched by joined args prefix
 	errs    map[string]error
 }
@@ -16,6 +17,7 @@ type fakeBackend struct {
 func (f *fakeBackend) Run(_ context.Context, args []string, stdin string) (string, error) {
 	key := strings.Join(args, " ")
 	f.calls = append(f.calls, key)
+	f.stdins = append(f.stdins, stdin)
 	if err, ok := f.errs[key]; ok {
 		return "", err
 	}
@@ -46,6 +48,59 @@ func TestApplyPassesStdin(t *testing.T) {
 	}
 	if len(fb.calls) != 1 || fb.calls[0] != "-f -" {
 		t.Fatalf("calls = %v", fb.calls)
+	}
+	if fb.stdins[0] != "table inet x {}" {
+		t.Fatalf("stdin = %q", fb.stdins[0])
+	}
+}
+
+// Existing table: delete + ruleset must reach nft as ONE -f - transaction so
+// there is no window where tenant traffic flows unmarked.
+func TestApplyReplacingPrependsDelete(t *testing.T) {
+	fb := &fakeBackend{}
+	c := New(fb)
+	if err := c.ApplyReplacing(context.Background(), "table inet fencebreaker {}"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fb.calls) != 2 || fb.calls[0] != "list table inet fencebreaker" || fb.calls[1] != "-f -" {
+		t.Fatalf("calls = %v", fb.calls)
+	}
+	want := "delete table inet fencebreaker\ntable inet fencebreaker {}"
+	if fb.stdins[1] != want {
+		t.Fatalf("stdin = %q, want %q", fb.stdins[1], want)
+	}
+}
+
+// Missing table: plain apply without the delete prelude (delete of a missing
+// table would abort the whole transaction).
+func TestApplyReplacingWithoutTable(t *testing.T) {
+	fb := &fakeBackend{errs: map[string]error{
+		"list table inet fencebreaker": errors.New("Error: No such file or directory"),
+	}}
+	c := New(fb)
+	if err := c.ApplyReplacing(context.Background(), "table inet fencebreaker {}"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fb.calls) != 2 || fb.calls[1] != "-f -" {
+		t.Fatalf("calls = %v", fb.calls)
+	}
+	if fb.stdins[1] != "table inet fencebreaker {}" {
+		t.Fatalf("stdin = %q", fb.stdins[1])
+	}
+}
+
+// A probe failure other than "missing table" must not fall through to a
+// plain apply.
+func TestApplyReplacingProbeError(t *testing.T) {
+	fb := &fakeBackend{errs: map[string]error{
+		"list table inet fencebreaker": errors.New("operation not permitted"),
+	}}
+	c := New(fb)
+	if err := c.ApplyReplacing(context.Background(), "table inet fencebreaker {}"); err == nil {
+		t.Fatal("expected probe error")
+	}
+	if len(fb.calls) != 1 {
+		t.Fatalf("no -f - must run after a probe error: %v", fb.calls)
 	}
 }
 

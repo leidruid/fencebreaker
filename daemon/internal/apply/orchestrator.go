@@ -94,9 +94,10 @@ type Orchestrator struct {
 	// the periodic status refresh re-parses UCI into fresh tenant objects
 	// and must not lose the runtime channel state.
 	egressStates map[string]string
-	// lastRuleset is the most recent successfully applied nftables ruleset
-	// (persisted to RunDir/ruleset.nft); a failed apply rolls the table back
-	// to it instead of leaving nothing installed.
+	// lastRuleset is the most recent successfully applied nftables ruleset,
+	// persisted to RunDir/ruleset.nft for inspection. Applies are single
+	// nft transactions, so a failed apply leaves the previous table in
+	// place and no rollback is needed.
 	lastRuleset string
 }
 
@@ -264,11 +265,9 @@ func (o *Orchestrator) Full(ctx context.Context) error {
 		o.lastRuleset = ""
 		_ = os.Remove(o.Paths.RunDir + "/ruleset.nft")
 	} else {
-		if err := o.Nft.DeleteTable(ctx); err != nil {
-			o.Log.Printf("nft delete table: %v", err)
-		}
-		if err := o.Nft.Apply(ctx, ruleset); err != nil {
-			o.rollbackRuleset(ctx, err)
+		// One nft transaction: delete + re-add with no unmarked window; a
+		// failed apply leaves the previous table fully in place.
+		if err := o.Nft.ApplyReplacing(ctx, ruleset); err != nil {
 			return o.failStatus(err, "apply nft ruleset")
 		}
 		o.lastRuleset = ruleset
@@ -484,23 +483,6 @@ func (o *Orchestrator) saveRuleset() {
 	if err := os.Rename(tmp, o.Paths.RunDir+"/ruleset.nft"); err != nil {
 		o.Log.Printf("save ruleset: %v", err)
 	}
-}
-
-// rollbackRuleset restores the last successfully applied table after a new
-// ruleset failed to apply, keeping the previous behavior alive instead of
-// leaving no fencebreaker table at all.
-func (o *Orchestrator) rollbackRuleset(ctx context.Context, applyErr error) {
-	if o.lastRuleset == "" {
-		return
-	}
-	if err := o.Nft.DeleteTable(ctx); err != nil {
-		o.Log.Printf("nft rollback: delete table: %v", err)
-	}
-	if err := o.Nft.Apply(ctx, o.lastRuleset); err != nil {
-		o.Log.Printf("nft rollback to last good ruleset failed: %v (apply error: %v)", err, applyErr)
-		return
-	}
-	o.Log.Printf("nft apply failed (%v); last good ruleset restored", applyErr)
 }
 
 func (o *Orchestrator) failStatus(err error, stage string) error {

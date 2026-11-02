@@ -162,7 +162,9 @@ func TestFullSavesLastGoodRuleset(t *testing.T) {
 	}
 }
 
-func TestApplyFailureRollsBackToLastGood(t *testing.T) {
+// Applies are single nft transactions: a failed apply aborts with the old
+// table fully intact, so no rollback re-apply may run.
+func TestApplyFailureKeepsPreviousRuleset(t *testing.T) {
 	o, backend, runDir := newOrch(t, "")
 	if err := o.Full(context.Background()); err != nil {
 		t.Fatalf("full apply: %v", err)
@@ -184,14 +186,18 @@ func TestApplyFailureRollsBackToLastGood(t *testing.T) {
 	}
 
 	got := applies(backend)
-	if len(got) != 2 {
-		t.Fatalf("expected failed apply + rollback apply, got %d applies", len(got))
+	if len(got) != 1 {
+		t.Fatalf("expected exactly the failed apply (no rollback), got %d applies", len(got))
 	}
 	if got[0] == good {
-		t.Error("first apply must be the new (changed) ruleset")
+		t.Error("the failed apply must be the new (changed) ruleset")
 	}
-	if got[1] != good {
-		t.Error("second apply must restore the last good ruleset")
+	// the replace must be one transaction: delete prelude + ruleset
+	if !strings.HasPrefix(got[0], "delete table inet fencebreaker\n") {
+		t.Error("apply is not a single delete+re-add transaction")
+	}
+	if o.lastRuleset != good {
+		t.Error("lastRuleset must survive a failed apply")
 	}
 
 	// the failure must be visible in status.json and survive the
@@ -214,7 +220,7 @@ func TestApplyFailureRollsBackToLastGood(t *testing.T) {
 	}
 }
 
-func TestRollbackWithoutSavedRulesetKeepsError(t *testing.T) {
+func TestFirstApplyFailureKeepsError(t *testing.T) {
 	o, backend, runDir := newOrch(t, "")
 	backend.failApply = func(stdin string) error {
 		return fmt.Errorf("nft -f -: exit status 1: broken")
