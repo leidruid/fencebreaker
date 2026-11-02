@@ -27,6 +27,9 @@ type AddResult struct {
 	Evicted  int // oldest entries evicted due to max_set_size
 	WriteErr error
 	EvictErr error
+	// FlushIPs lists the IPs that were absent or expired before this add —
+	// routing towards them changed, callers flush conntrack for them.
+	FlushIPs []string
 }
 
 // mirrorManager owns all set mirrors of all tenants and routes every nftables
@@ -125,6 +128,7 @@ func (m *mirrorManager) AddIfAbsent(setName string, ips []string, timeout time.D
 	sm := m.ensureSet(setName)
 
 	batch := map[string]time.Duration{}
+	var fresh []string // absent or expired: routing towards them changes
 	for _, ip := range ips {
 		e, ok := sm.entries[ip]
 		if ok && now.Before(e.deadline) {
@@ -141,6 +145,7 @@ func (m *mirrorManager) AddIfAbsent(setName string, ips []string, timeout time.D
 			continue
 		}
 		batch[ip] = timeout
+		fresh = append(fresh, ip)
 	}
 	if len(batch) == 0 {
 		return res
@@ -150,28 +155,40 @@ func (m *mirrorManager) AddIfAbsent(setName string, ips []string, timeout time.D
 	// On evict error still try the add; resync will reconcile.
 	added, err := m.applyBatch(setName, sm, batch, now)
 	res.Added, res.WriteErr = added, err
+	if err == nil {
+		res.FlushIPs = fresh
+	}
 	return res
 }
 
 // Refresh unconditionally re-adds ips with a fresh timeout, extending their
 // deadlines (keeper keep-alive path; CONTRACTS §3). Elements no longer present
-// in the answer are NOT removed: several domains may share CDN IPs.
-func (m *mirrorManager) Refresh(setName string, ips []string, timeout time.Duration, now time.Time) error {
+// in the answer are NOT removed: several domains may share CDN IPs. The first
+// return value lists IPs that were absent or expired (routing changed) —
+// callers flush conntrack for them.
+func (m *mirrorManager) Refresh(setName string, ips []string, timeout time.Duration, now time.Time) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(ips) == 0 || timeout <= 0 {
-		return nil
+		return nil, nil
 	}
 	sm := m.ensureSet(setName)
 	batch := map[string]time.Duration{}
+	var fresh []string
 	for _, ip := range ips {
 		batch[ip] = timeout
+		if e, ok := sm.entries[ip]; !ok || !now.Before(e.deadline) {
+			fresh = append(fresh, ip)
+		}
 	}
 	// Overflow eviction is best-effort here; the add below still runs and a
 	// resync reconciles.
 	_, _ = m.evictOverflowLocked(sm, batch)
 	_, err := m.applyBatch(setName, sm, batch, now)
-	return err
+	if err != nil {
+		fresh = nil
+	}
+	return fresh, err
 }
 
 // applyBatch writes the batch to nft and updates the mirror on success.

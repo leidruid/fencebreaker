@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=fencebreaker
 PKG_VERSION:=0.1.0
-PKG_RELEASE:=12
+PKG_RELEASE:=13
 
 PKG_LICENSE:=Apache-2.0
 PKG_MAINTAINER:=fencebreaker project
@@ -38,7 +38,7 @@ define Package/fencebreaker
   # sing-box is optional: required only for VLESS tenants (install manually
   # on space-constrained systems); the singbox init script skips starting
   # when the binary is absent.
-  DEPENDS:=$(GO_ARCH_DEPENDS) +nftables +kmod-nft-nat +ca-bundle +ca-certificates \
+  DEPENDS:=$(GO_ARCH_DEPENDS) +nftables +kmod-nft-nat +conntrack +ca-bundle +ca-certificates \
 	+fencebreaker-coredns
   MENU:=1
 endef

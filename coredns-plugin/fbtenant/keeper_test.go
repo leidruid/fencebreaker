@@ -193,9 +193,9 @@ func TestMirrorRefreshExtendsDeadline(t *testing.T) {
 	if res := m.AddIfAbsent("t1_inc_dns", []string{"9.9.9.9"}, 120*time.Second, now.Add(10*time.Second)); res.Skipped != 1 || ops.addCount() != 1 {
 		t.Fatalf("duplicate not skipped: %+v", res)
 	}
-	// Refresh is unconditional.
-	if err := m.Refresh("t1_inc_dns", []string{"9.9.9.9"}, 300*time.Second, now.Add(20*time.Second)); err != nil {
-		t.Fatalf("refresh: %v", err)
+	// Refresh is unconditional; a live element reports no fresh (flush) IPs.
+	if fresh, err := m.Refresh("t1_inc_dns", []string{"9.9.9.9"}, 300*time.Second, now.Add(20*time.Second)); err != nil || len(fresh) != 0 {
+		t.Fatalf("refresh: fresh=%v err=%v", fresh, err)
 	}
 	if ops.addCount() != 2 {
 		t.Fatalf("refresh did not reach nft: %d adds", ops.addCount())
@@ -215,6 +215,10 @@ func TestMirrorRefreshExtendsDeadline(t *testing.T) {
 	}
 	if _, ok := m.MinDeadline("t_missing", []string{"9.9.9.9"}, at); ok {
 		t.Fatal("MinDeadline found an unknown set")
+	}
+	// Refresh after the element lapsed reports it for a conntrack flush.
+	if fresh, err := m.Refresh("t1_inc_dns", []string{"9.9.9.9"}, 300*time.Second, now.Add(400*time.Second)); err != nil || len(fresh) != 1 || fresh[0] != "9.9.9.9" {
+		t.Fatalf("refresh of lapsed element: fresh=%v err=%v", fresh, err)
 	}
 }
 

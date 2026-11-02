@@ -1,6 +1,7 @@
 package fbtenant
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -218,3 +219,44 @@ func TestMirrorUpdateKnobsDropsRemovedSets(t *testing.T) {
 type staticError struct{ msg string }
 
 func (e *staticError) Error() string { return e.msg }
+
+// TestAddIfAbsentFlushIPs verifies that only IPs new to the set (absent or
+// expired) are reported in FlushIPs: duplicates and refresh-merged elements
+// do not change routing, a failed nft write reports nothing.
+func TestAddIfAbsentFlushIPs(t *testing.T) {
+	m := newMirrorManager(newMockNFT(), "fencebreaker", mirrorTestState(0, 0))
+	now := time.Now()
+
+	res := m.AddIfAbsent("t1_inc_dns", []string{"1.2.3.4", "5.6.7.8"}, 300*time.Second, now)
+	if len(res.FlushIPs) != 2 {
+		t.Fatalf("first add: FlushIPs = %v, want both", res.FlushIPs)
+	}
+	// duplicate: live element, no routing change
+	res = m.AddIfAbsent("t1_inc_dns", []string{"1.2.3.4"}, 300*time.Second, now.Add(time.Second))
+	if len(res.FlushIPs) != 0 {
+		t.Fatalf("duplicate add: FlushIPs = %v, want none", res.FlushIPs)
+	}
+	// mixed: only the new IP is reported
+	res = m.AddIfAbsent("t1_inc_dns", []string{"1.2.3.4", "9.9.9.9"}, 300*time.Second, now.Add(2*time.Second))
+	if len(res.FlushIPs) != 1 || res.FlushIPs[0] != "9.9.9.9" {
+		t.Fatalf("mixed add: FlushIPs = %v, want [9.9.9.9]", res.FlushIPs)
+	}
+	// expired element counts as fresh again
+	res = m.AddIfAbsent("t1_inc_dns", []string{"9.9.9.9"}, 300*time.Second, now.Add(303*time.Second))
+	if len(res.FlushIPs) != 1 || res.FlushIPs[0] != "9.9.9.9" {
+		t.Fatalf("re-add after expiry: FlushIPs = %v", res.FlushIPs)
+	}
+}
+
+func TestAddIfAbsentWriteErrNoFlush(t *testing.T) {
+	ops := newMockNFT()
+	ops.addErr["t1_inc_dns"] = errors.New("nft broken")
+	m := newMirrorManager(ops, "fencebreaker", mirrorTestState(0, 0))
+	res := m.AddIfAbsent("t1_inc_dns", []string{"1.2.3.4"}, 300*time.Second, time.Now())
+	if res.WriteErr == nil {
+		t.Fatal("expected write error")
+	}
+	if len(res.FlushIPs) != 0 {
+		t.Fatalf("failed write must not report FlushIPs: %v", res.FlushIPs)
+	}
+}

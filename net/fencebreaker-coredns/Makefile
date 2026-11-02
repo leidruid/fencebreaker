@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=fencebreaker-coredns
 PKG_VERSION:=1.15.0
-PKG_RELEASE:=7
+PKG_RELEASE:=8
 
 PKG_SOURCE:=coredns-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/coredns/coredns/tar.gz/v$(PKG_VERSION)?
@@ -41,7 +41,7 @@ define Package/fencebreaker-coredns
   SECTION:=net
   CATEGORY:=Network
   URL:=https://github.com/leidruid/fencebreaker
-  DEPENDS:=$(GO_ARCH_DEPENDS) +ca-bundle
+  DEPENDS:=$(GO_ARCH_DEPENDS) +ca-bundle +conntrack
 endef
 
 define Package/fencebreaker-coredns/description

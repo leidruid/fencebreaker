@@ -571,13 +571,17 @@ func (f *FBTenant) refreshKeeperDomain(ctx context.Context, cfg *config, t *prep
 		return
 	}
 	timeout := clampTTL(qttl, ttlMin(&cfg.state), ttlMax(&cfg.state))
-	if err := m.Refresh(setName, ips, timeout, now); err != nil {
+	fresh, err := m.Refresh(setName, ips, timeout, now)
+	if err != nil {
 		// An nft failure is not the domain's fault: count the error but
 		// keep the record; the resync reconciles the mirror.
 		k.noteError()
 		log.Warningf("fbtenant: keeper refresh %s tenant %s: %v", d.name, t.raw.ID, err)
 		f.scheduleResyncSoon()
 		return
+	}
+	if len(fresh) > 0 {
+		f.flushConntrack(fresh)
 	}
 	k.refreshed(d.name, timeout, now)
 }

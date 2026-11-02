@@ -38,6 +38,7 @@ type FBTenant struct {
 
 	client upstreamClient
 	nft    NFTOps
+	ct     ConntrackFlusher
 
 	// cfg holds the active config snapshot, replaced on state reload.
 	cfg atomic.Pointer[config]
@@ -62,12 +63,22 @@ func New() *FBTenant {
 	return &FBTenant{
 		client:         newDNSUpstreamClient(),
 		nft:            newNFTOps(),
+		ct:             execConntrack{},
 		pollInterval:   2 * time.Second,
 		statusInterval: 5 * time.Second,
 		keeperInterval: keeperTick,
 		keeperSem:      make(chan struct{}, keeperConcurrency),
 		stopCh:         make(chan struct{}),
 	}
+}
+
+// flushConntrack routes freshly learned IPs through the flusher off the DNS
+// answer path (each flush execs conntrack; the client must not wait for it).
+func (f *FBTenant) flushConntrack(ips []string) {
+	if len(ips) == 0 || f.ct == nil {
+		return
+	}
+	go f.ct.FlushDst(ips)
 }
 
 // currentCfg returns the active config snapshot (nil until first load).
@@ -234,6 +245,11 @@ func (f *FBTenant) learn(state *State, tenant *preparedTenant, kind, qname strin
 		tenant.stats.setLastError(res.WriteErr.Error())
 		log.Warningf("fbtenant: tenant %s %v", tenant.raw.ID, res.WriteErr)
 		f.scheduleResyncSoon()
+	}
+	if len(res.FlushIPs) > 0 {
+		// newly learned IPs: established flows still follow their original
+		// route — drop them so clients reconnect through the tenant channel
+		f.flushConntrack(res.FlushIPs)
 	}
 	if !tenant.keepalive {
 		return
